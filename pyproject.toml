@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bstkchat"
+version = "1.0.1"
+description = "A real-time Terminal-based Chatting Application using unique room IDs."
+readme = "README.md"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+]
+dependencies = [
+    "paho-mqtt>=1.6.1",
+    "rich>=13.0.0",
+    "prompt-toolkit>=3.0.0",
+]
+
+[project.scripts]
+bstkchat = "bstkchat.cli:main"
+
+[project.urls]
+"Homepage" = "https://github.com/yourusername/bstkchat"
