@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bstkchat"
-version = "1.0.1"
+version = "1.1.0"
 description = "A real-time Terminal-based Chatting Application using unique room IDs."
 readme = "README.md"
 requires-python = ">=3.7"
