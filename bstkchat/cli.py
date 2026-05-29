@@ -10,9 +10,14 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style as PromptStyle
 from rich.markdown import Markdown
 
-from .ui import UIManager, show_welcome, generate_room_id, get_user_color
-from .network import MQTTClientWrapper
-from .crypto import derive_room_key, encrypt_payload, decrypt_payload, DmCryptoManager
+try:
+    from bstkchat.ui import UIManager, show_welcome, generate_room_id, get_user_color
+    from bstkchat.network import MQTTClientWrapper
+    from bstkchat.crypto import derive_room_key, encrypt_payload, decrypt_payload, DmCryptoManager
+except ImportError:
+    from ui import UIManager, show_welcome, generate_room_id, get_user_color
+    from network import MQTTClientWrapper
+    from crypto import derive_room_key, encrypt_payload, decrypt_payload, DmCryptoManager
 
 class ChatClient:
     def __init__(self, nickname: str, room_id: str, password: str = ""):
