@@ -2,12 +2,13 @@ from setuptools import setup, find_packages
 
 setup(
     name="bstkchat",
-    version="1.0.1",
+    version="2.2.0",
     packages=find_packages(),
     install_requires=[
         "paho-mqtt>=1.6.1",
         "rich>=13.0.0",
         "prompt-toolkit>=3.0.0",
+        "cryptography>=41.0.0",
     ],
     entry_points={
         "console_scripts": [
@@ -16,7 +17,7 @@ setup(
     },
     author="BSTK Developers",
     description="A real-time Terminal-based Chatting Application using unique room IDs.",
-    long_description=open("README.md").read(),
+    long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     classifiers=[
         "Programming Language :: Python :: 3",

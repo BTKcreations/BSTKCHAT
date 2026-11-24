@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bstkchat"
-version = "1.1.0"
+version = "2.2.0"
 description = "A real-time Terminal-based Chatting Application using unique room IDs."
 readme = "README.md"
 requires-python = ">=3.7"
@@ -18,10 +18,11 @@ dependencies = [
     "paho-mqtt>=1.6.1",
     "rich>=13.0.0",
     "prompt-toolkit>=3.0.0",
+    "cryptography>=41.0.0",
 ]
 
 [project.scripts]
 bstkchat = "bstkchat.cli:main"
 
 [project.urls]
-"Homepage" = "https://github.com/yourusername/bstkchat"
+"Homepage" = "https://github.com/BTKcreations/BSTKCHAT"

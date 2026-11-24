@@ -4,11 +4,12 @@ bstkchat is a real-time, terminal-based, zero-configuration collaborative chat c
 
 ## **Features**
 
-* **Zero Configuration**: Connects instantly to a public MQTT infrastructure—no servers to set up or configure\!  
-* **Non-blocking Input**: Messages arriving dynamically will *never* corrupt or break the active line you are typing into, thanks to prompt\_toolkit.  
-* **Memorable Auto-Rooms**: If you don't supply a Room ID, the app will generate a fun phonetic key like quantum-beacon-55 for you.  
-* **Deterministic Color Codes**: Users are automatically allocated static text colors based on their username hashes, making conversations extremely easy to follow.  
-* **Command Architecture**: Supports built-in slash commands to change nicknames, jump rooms, see active user tables, and clear logs.
+* **Zero Configuration**: Connects instantly to a public MQTT infrastructure—no servers to set up or configure!
+* **End-to-End Encryption (E2EE)**: Optional room-password encryption using scrypt key derivation and AES-256-GCM authenticated encryption with per-message random nonces.
+* **Modern Terminal UI/UX**: Non-blocking input with `prompt_toolkit`, live bottom status bar, slash-command & `@mention` autocomplete, command history, and Rich Markdown rendering.
+* **Memorable Auto-Rooms**: If you don't supply a Room ID, the app generates a fun phonetic key like `quantum-beacon-55`.
+* **Deterministic Color Codes**: Users are automatically allocated consistent text colors based on their username.
+* **Private DMs, Mentions & Logging**: Send encrypted DMs (`/msg`), receive audio/highlight alerts on `@mentions`, and save sanitized local logs to `~/.bstkchat/logs/`.
 
 ## **Installation**
 
@@ -38,10 +39,13 @@ python \-m bstkchat.cli
 
 | Command | Action |
 | :---- | :---- |
-| /help | Displays a formatted table listing all commands |
-| /room \<new-room-id\> | Switches context and connects you to a new room ID instantly |
-| /nick \<new-name\> | Renames your user identity inside the room and alerts others |
-| /who or /users | Lists all online participants active inside your room |
-| /clear | Wipes the active console screen |
-| /exit | Gracefully announces leave status and exits the CLI |
+| `/help` | Displays a formatted table listing all commands |
+| `/room <id> [pass]` | Switches rooms and optionally enables AES-256-GCM E2EE with a password |
+| `/nick <name>` | Renames your user identity inside the room and alerts others |
+| `/msg <user> <msg>` | Sends an encrypted private direct message (DM) to a user |
+| `/status <text>` | Sets a custom status message (e.g., `AFK`, `Coding`) |
+| `/who` or `/users` | Lists all online participants active inside your room |
+| `/log [on\|off]` | Toggles session logging or shows the current log file path |
+| `/clear` | Wipes the active console screen |
+| `/exit` or `/quit` | Gracefully announces leave status and exits the CLI |
 
