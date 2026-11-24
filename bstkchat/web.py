@@ -13,9 +13,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
-from bstkchat.config import MAX_FILE_BYTES, search_log
+from bstkchat.config import MAX_FILE_BYTES, sanitize_filename, search_log
 
 MAX_BODY_BYTES = 1024 * 1024  # 1 MB max JSON request body
+SAFE_INLINE_IMAGES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
 
 
 def _load_web_html() -> bytes:
@@ -115,6 +122,31 @@ class WebServer:
                     query = qs.get("q", [""])[0]
                     matches = search_log(server_ref.chat.get_log_filepath(), query, limit=40)
                     self._send_json(HTTPStatus.OK, {"matches": matches})
+                    return
+
+                if parsed.path == "/api/file/preview":
+                    qs = parse_qs(parsed.query)
+                    file_id = qs.get("id", [""])[0]
+                    force_download = qs.get("download", ["0"])[0] == "1"
+                    entry = server_ref.chat.get_shared_file(file_id)
+                    if not entry:
+                        self._send_json(HTTPStatus.NOT_FOUND, {"error": "File not found"})
+                        return
+                    filename = sanitize_filename(str(entry["filename"]))
+                    ext = os.path.splitext(filename)[1].lower()
+                    raw_bytes = bytes(entry["data"])
+                    mime = SAFE_INLINE_IMAGES.get(ext, "application/octet-stream")
+                    is_inline = (ext in SAFE_INLINE_IMAGES) and not force_download
+                    disp = f'inline; filename="{filename}"' if is_inline else f'attachment; filename="{filename}"'
+
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", mime)
+                    self.send_header("Content-Length", str(len(raw_bytes)))
+                    self.send_header("Content-Disposition", disp)
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(raw_bytes)
                     return
 
                 if parsed.path == "/events":

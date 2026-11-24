@@ -57,7 +57,7 @@ from bstkchat.crypto import (
     sanitize_room_id,
 )
 
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 AUTO_AWAY_SECONDS = 300
 TYPING_TTL_SECONDS = 5.0
 TYPING_THROTTLE_SECONDS = 3.0
@@ -266,6 +266,7 @@ class ChatClient:
         self.peers: Dict[str, Dict[str, object]] = {}
         self.typing_peers: Dict[str, float] = {}
         self.pending_files: Dict[str, Dict[str, object]] = {}
+        self.shared_files: Dict[str, Dict[str, object]] = {}
         self._file_seq = 0
 
         self.running = True
@@ -843,12 +844,14 @@ class ChatClient:
         with self._lock:
             self._file_seq += 1
             file_id = str(self._file_seq)
-            self.pending_files[file_id] = {
+            file_entry = {
                 "sender": sender,
                 "filename": filename,
                 "data": raw_bytes,
                 "size": len(raw_bytes),
             }
+            self.pending_files[file_id] = file_entry
+            self.shared_files[file_id] = file_entry
 
         size_kb = len(raw_bytes) / 1024.0
         self.print_system(
@@ -864,12 +867,17 @@ class ChatClient:
                 "sender": sender,
                 "filename": filename,
                 "size": len(raw_bytes),
+                "own": False,
                 "time": datetime.now().strftime("%H:%M:%S"),
             },
             record_history=True,
         )
         self._emit_event("state_update", self.get_web_state())
         self._ring_bell()
+
+    def get_shared_file(self, file_id: str) -> Optional[Dict[str, object]]:
+        with self._lock:
+            return self.shared_files.get(file_id)
 
     def accept_file(self, file_id: Optional[str] = None, target_dir: str = "") -> Optional[str]:
         """Saves a pending encrypted file transfer to ~/Downloads/bstkchat."""
@@ -909,15 +917,28 @@ class ChatClient:
             "data": base64.b64encode(raw_bytes).decode("ascii"),
         })
         if self._publish_encrypted("file", payload_json):
+            with self._lock:
+                self._file_seq += 1
+                file_id = str(self._file_seq)
+                self.shared_files[file_id] = {
+                    "sender": self.nickname,
+                    "filename": clean_name,
+                    "data": raw_bytes,
+                    "size": len(raw_bytes),
+                }
             self.print_system(
                 f"📤 Sent encrypted file [bold white]{escape_markup(clean_name)}[/] "
                 f"({len(raw_bytes) / 1024:.1f} KB).",
                 log_text=f"Sent file {clean_name}",
             )
             self._emit_event(
-                "system",
+                "file_offer",
                 {
-                    "text": f"You sent encrypted file {clean_name} ({len(raw_bytes) / 1024:.1f} KB).",
+                    "id": file_id,
+                    "sender": self.nickname,
+                    "filename": clean_name,
+                    "size": len(raw_bytes),
+                    "own": True,
                     "time": datetime.now().strftime("%H:%M:%S"),
                 },
                 record_history=True,
@@ -1091,6 +1112,7 @@ class ChatClient:
             self.peers.clear()
             self.typing_peers.clear()
             self.pending_files.clear()
+            self.shared_files.clear()
             new_msg_topic = self.msg_topic
             new_presence_topic = self.presence_topic
             new_sync_topic = self.sync_topic

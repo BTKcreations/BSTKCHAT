@@ -260,6 +260,44 @@
       outline: none;
     }
     .composer textarea:focus { border-color: var(--accent); }
+    .chat-img {
+      display: block;
+      max-width: 320px;
+      max-height: 260px;
+      border-radius: 10px;
+      margin: 6px 0;
+      cursor: zoom-in;
+      border: 1px solid var(--border);
+      object-fit: cover;
+    }
+    .file-card {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      margin-top: 4px;
+      flex-wrap: wrap;
+    }
+    .lightbox {
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 6, 23, 0.88);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 999;
+      padding: 24px;
+      cursor: zoom-out;
+    }
+    .lightbox img {
+      max-width: 92vw;
+      max-height: 90vh;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+    }
     @media (max-width: 820px) {
       body { grid-template-columns: 1fr; }
       .sidebar { display: none; }
@@ -329,7 +367,7 @@
           <option value="">Everyone in room</option>
         </select>
         <label class="btn-ghost" style="cursor:pointer;">
-          📎 Send File (≤512KB)
+          📎 Send Image / File (≤512KB)
           <input id="fileInput" type="file" style="display:none;" onchange="uploadFile(this)" />
         </label>
       </div>
@@ -339,6 +377,10 @@
       </div>
     </footer>
   </main>
+
+  <div id="lightbox" class="lightbox" onclick="this.style.display='none'">
+    <img id="lightboxImg" src="" alt="Preview" />
+  </div>
 
   <script>
     const TOKEN = new URLSearchParams(location.search).get("token") || "";
@@ -416,19 +458,50 @@
       msgEl.scrollTop = msgEl.scrollHeight;
     }
 
+    function isImageFile(name) {
+      return /\.(png|jpe?g|gif|webp)$/i.test(String(name || ""));
+    }
+
+    function openLightbox(src) {
+      document.getElementById("lightboxImg").src = src;
+      document.getElementById("lightbox").style.display = "flex";
+    }
+
     function appendFileOffer(data) {
       const div = document.createElement("div");
-      div.className = "msg";
+      div.className = "msg" + (data.own ? " own" : "");
       const kb = (Number(data.size || 0) / 1024).toFixed(1);
+      const fid = encodeURIComponent(data.id);
+      const tok = encodeURIComponent(TOKEN);
+      const previewUrl = `/api/file/preview?id=${fid}&token=${tok}`;
+      const downloadUrl = `/api/file/preview?id=${fid}&download=1&token=${tok}`;
+      const saveBtn = data.own
+        ? ""
+        : `<button class="btn" onclick="acceptFile('${escapeHtml(data.id)}', this)">Save to Downloads</button>`;
+
+      const bodyHtml = isImageFile(data.filename)
+        ? `
+          <img class="chat-img" src="${previewUrl}" alt="${escapeHtml(data.filename)}" onclick="openLightbox('${previewUrl}')" />
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:0.8rem;">
+            <span style="color:var(--muted);">${escapeHtml(data.filename)} (${kb} KB)</span>
+            <a class="btn-ghost" style="text-decoration:none;" href="${downloadUrl}" download="${escapeHtml(data.filename)}">⬇ Download</a>
+            ${saveBtn}
+          </div>
+        `
+        : `
+          <div class="file-card">
+            <span>📄 <strong>${escapeHtml(data.filename)}</strong> <span style="color:var(--muted);">(${kb} KB)</span></span>
+            <a class="btn-ghost" style="text-decoration:none;" href="${downloadUrl}" download="${escapeHtml(data.filename)}">⬇ Download</a>
+            ${saveBtn}
+          </div>
+        `;
+
       div.innerHTML = `
         <div class="msg-head">
-          <span class="msg-sender">📎 ${escapeHtml(data.sender)}</span>
+          <span class="msg-sender">${escapeHtml(data.own ? data.sender + " (You)" : data.sender)}</span>
           <span class="msg-time">${escapeHtml(data.time || "")}</span>
         </div>
-        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-          <span><strong>${escapeHtml(data.filename)}</strong> (${kb} KB)</span>
-          <button class="btn" onclick="acceptFile('${escapeHtml(data.id)}', this)">Accept &amp; Save</button>
-        </div>
+        ${bodyHtml}
       `;
       msgEl.appendChild(div);
       msgEl.scrollTop = msgEl.scrollHeight;

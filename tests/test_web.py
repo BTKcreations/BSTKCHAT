@@ -69,3 +69,34 @@ def test_web_server_auth_and_api(tmp_path):
             assert json.loads(resp.read().decode("utf-8"))["ok"] is True
     finally:
         server.stop()
+
+
+def test_web_file_preview_inline_image_and_attachment():
+    chat = ChatClient("Alice", "img-room", "pw", store_chain=False)
+    chat.client = MagicMock()
+    chat.safe_print = MagicMock()
+    chat.write_to_log = MagicMock()
+
+    assert chat.send_file_bytes("photo.png", b"\x89PNG\r\n\x1a\nfake") is True
+    assert chat.send_file_bytes("script.html", b"<script>alert(1)</script>") is True
+
+    server = WebServer(chat, port=0)
+    url = server.start()
+    try:
+        base_url, token_part = url.split("/?token=")
+
+        # Safe PNG image is served inline with image/png and nosniff
+        with urllib.request.urlopen(f"{base_url}/api/file/preview?id=1&token={token_part}") as resp:
+            assert resp.status == 200
+            assert resp.headers["Content-Type"] == "image/png"
+            assert "inline;" in resp.headers["Content-Disposition"]
+            assert resp.headers["X-Content-Type-Options"] == "nosniff"
+            assert resp.read().startswith(b"\x89PNG")
+
+        # HTML/non-image file is forced as attachment (never inline XSS)
+        with urllib.request.urlopen(f"{base_url}/api/file/preview?id=2&token={token_part}") as resp:
+            assert resp.status == 200
+            assert resp.headers["Content-Type"] == "application/octet-stream"
+            assert "attachment;" in resp.headers["Content-Disposition"]
+    finally:
+        server.stop()
