@@ -6,6 +6,7 @@
 
 ## Features
 
+- **Mobile & Browser Web App (PWA on GitHub Pages):** Open **https://btkcreations.github.io/BSTKCHAT/** on any phone or browser and tap **Install to Home Screen**—connects via MQTT over Secure WebSockets (`wss://broker.hivemq.com:8884/mqtt`) with compatible AES-256-GCM E2EE so mobile and terminal users chat in the same rooms.
 - **Browser Web UI (`--web` / `/web`):** Launch a local, token-authenticated browser interface (`bstkchat --web`) with Dark/Light themes, live peer sidebar, file drag-and-drop, and SSE real-time updates—while keeping all E2EE and decentralized chain storage locally on your machine.
 - **Zero Configuration + CLI Flags:** Connects automatically over MQTT (`broker.hivemq.com`) with TLS (`8883`) enabled by default, or use `--nick`, `--room`, `--password`, `--broker`, `--port`, `--no-tls`, `--web`, and `--web-port`.
 - **End-to-End Encryption (E2EE):** Protect rooms with a password using `scrypt` key derivation, per-message random 96-bit nonces, **AES-256-GCM** authenticated encryption, and topic-bound AAD.

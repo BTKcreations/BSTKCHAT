@@ -1,0 +1,19 @@
+{
+  "name": "BSTK Chat — Decentralized E2EE",
+  "short_name": "BSTK Chat",
+  "description": "Zero-config end-to-end encrypted terminal & mobile chat with decentralized room sync.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0b1120",
+  "theme_color": "#0b1120",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

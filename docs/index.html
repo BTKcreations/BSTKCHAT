@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1120" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="BSTK Chat" />
+  <title>BSTK Chat — Decentralized E2EE</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="./icon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet" />
+  <script src="https://unpkg.com/mqtt@5.10.3/dist/mqtt.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/scrypt-js@3.0.1/scrypt.min.js"></script>
+  <style>
+    :root {
+      --bg: #0b1120;
+      --surface: #111827;
+      --surface-2: #1e293b;
+      --border: #263246;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-2: #818cf8;
+      --green: #22c55e;
+      --amber: #f59e0b;
+      --own-bg: #172554;
+      --dm-bg: #3b0764;
+      --mention-bg: rgba(245, 158, 11, 0.14);
+      --code-bg: #020617;
+    }
+    html[data-theme="light"] {
+      --bg: #f1f5f9;
+      --surface: #ffffff;
+      --surface-2: #f8fafc;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --muted: #64748b;
+      --accent: #0284c7;
+      --accent-2: #4f46e5;
+      --green: #16a34a;
+      --amber: #d97706;
+      --own-bg: #e0f2fe;
+      --dm-bg: #f3e8ff;
+      --mention-bg: rgba(245, 158, 11, 0.15);
+      --code-bg: #f1f5f9;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100dvh;
+      font-family: "Plus Jakarta Sans", "Roboto", -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      overflow: hidden;
+    }
+    input, select, textarea, button { font: inherit; color: inherit; }
+    .btn {
+      background: var(--accent);
+      color: #082f49;
+      font-weight: 600;
+      border: none;
+      border-radius: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn-ghost {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 7px 11px;
+      cursor: pointer;
+      font-size: 0.82rem;
+    }
+    .input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 0.92rem;
+      outline: none;
+    }
+    .input:focus { border-color: var(--accent); }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.72rem;
+      padding: 3px 9px;
+      border-radius: 999px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); }
+    .dot.ok { background: var(--green); }
+
+    /* Onboarding Screen */
+    .join-screen {
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 50;
+      overflow-y: auto;
+    }
+    .join-card {
+      width: 100%;
+      max-width: 400px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 24px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.35);
+    }
+    .join-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 1.25rem;
+      font-weight: 700;
+    }
+    .join-sub { font-size: 0.84rem; color: var(--muted); line-height: 1.45; }
+    .field-label { font-size: 0.75rem; font-weight: 600; color: var(--muted); margin-bottom: 4px; display: block; }
+
+    /* App Shell (Mobile-First) */
+    .app {
+      display: none;
+      height: 100dvh;
+      width: 100%;
+      grid-template-columns: 1fr;
+      position: relative;
+    }
+    .app.active { display: grid; }
+    .sidebar {
+      position: fixed;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      width: 290px;
+      max-width: 84vw;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 16px;
+      padding-top: max(16px, env(safe-area-inset-top));
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      overflow-y: auto;
+      z-index: 40;
+      transform: translateX(-100%);
+      transition: transform 0.22s ease;
+    }
+    .sidebar.open { transform: translateX(0); }
+    .backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.55);
+      z-index: 35;
+      display: none;
+    }
+    .backdrop.open { display: block; }
+    .card {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .card-title {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .peer-list { display: flex; flex-direction: column; gap: 6px; max-height: 190px; overflow-y: auto; }
+    .peer-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 7px 9px;
+      border-radius: 8px;
+      background: var(--bg);
+      font-size: 0.84rem;
+      cursor: pointer;
+    }
+    .main {
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+      overflow: hidden;
+    }
+    .topbar {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 14px;
+      padding-top: max(10px, env(safe-area-inset-top));
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .topbar-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .room-name {
+      font-weight: 700;
+      font-size: 1rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .topbar-right { display: flex; align-items: center; gap: 6px; }
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      -webkit-overflow-scrolling: touch;
+    }
+    .msg {
+      max-width: 86%;
+      padding: 9px 12px;
+      border-radius: 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      align-self: flex-start;
+      line-height: 1.45;
+      word-wrap: break-word;
+      font-size: 0.92rem;
+    }
+    .msg.own { background: var(--own-bg); align-self: flex-end; }
+    .msg.dm { background: var(--dm-bg); border-color: var(--accent-2); }
+    .msg.mention { background: var(--mention-bg); border-color: var(--amber); }
+    .msg.system {
+      align-self: center;
+      max-width: 92%;
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      font-size: 0.78rem;
+      padding: 2px 6px;
+      text-align: center;
+    }
+    .msg-head { display: flex; align-items: center; gap: 7px; font-size: 0.76rem; margin-bottom: 3px; flex-wrap: wrap; }
+    .msg-sender { font-weight: 700; }
+    .msg-time { color: var(--muted); font-size: 0.7rem; }
+    .msg-body pre {
+      background: var(--code-bg);
+      padding: 8px 10px;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 0.8rem;
+      margin: 5px 0 2px;
+    }
+    .msg-body code, .msg-body pre code {
+      font-family: "Roboto Mono", ui-monospace, monospace;
+      background: var(--code-bg);
+      padding: 1px 4px;
+      border-radius: 4px;
+      font-size: 0.84em;
+    }
+    .msg-body pre code { background: transparent; padding: 0; }
+    .chat-img {
+      display: block;
+      max-width: min(280px, 72vw);
+      max-height: 240px;
+      border-radius: 10px;
+      margin: 4px 0 6px;
+      cursor: zoom-in;
+      border: 1px solid var(--border);
+      object-fit: cover;
+    }
+    .typing-bar {
+      padding: 2px 14px;
+      font-size: 0.75rem;
+      color: var(--accent);
+      min-height: 18px;
+    }
+    .composer {
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      padding: 8px 12px;
+      padding-bottom: max(10px, env(safe-area-inset-bottom));
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .composer-meta { display: flex; align-items: center; gap: 8px; font-size: 0.75rem; color: var(--muted); }
+    .composer-row { display: flex; align-items: flex-end; gap: 8px; }
+    .composer textarea {
+      flex: 1;
+      resize: none;
+      min-height: 40px;
+      max-height: 120px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 9px 12px;
+      font-size: 0.94rem;
+      outline: none;
+    }
+    .composer textarea:focus { border-color: var(--accent); }
+    .lightbox {
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 6, 23, 0.9);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 99;
+      padding: 20px;
+    }
+    .lightbox img { max-width: 94vw; max-height: 88dvh; border-radius: 12px; }
+    @media (min-width: 900px) {
+      .app.active { grid-template-columns: 290px 1fr; }
+      .sidebar { position: static; transform: none; max-width: none; }
+      .menu-btn, .backdrop { display: none !important; }
+      .msg { max-width: 72%; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Join / Onboarding Screen -->
+  <section id="joinScreen" class="join-screen">
+    <div class="join-card">
+      <div class="join-logo">
+        <span>⚡ BSTK Chat</span>
+        <span class="pill">PWA • E2EE</span>
+      </div>
+      <div class="join-sub">
+        Decentralized, end-to-end encrypted chat compatible with the <strong>bstkchat</strong> terminal &amp; desktop Web UI.
+      </div>
+      <div>
+        <label class="field-label" for="joinNick">Nickname</label>
+        <input id="joinNick" class="input" placeholder="e.g. Alex" />
+      </div>
+      <div>
+        <label class="field-label" for="joinRoom">Room ID</label>
+        <div style="display:flex; gap:6px;">
+          <input id="joinRoom" class="input" placeholder="e.g. quantum-beacon-55" />
+          <button class="btn-ghost" type="button" onclick="fillRandomRoom()" title="Generate room">🎲</button>
+        </div>
+      </div>
+      <div>
+        <label class="field-label" for="joinPass">Room Password (Optional E2EE)</label>
+        <input id="joinPass" class="input" type="password" placeholder="Leave empty for public room" />
+      </div>
+      <button id="joinBtn" class="btn" type="button" onclick="startChat()">Join Room</button>
+      <button id="installBtn" class="btn-ghost" type="button" style="display:none;" onclick="triggerInstall()">📲 Install to Home Screen</button>
+    </div>
+  </section>
+
+  <!-- Main Chat App -->
+  <div id="app" class="app">
+    <div id="backdrop" class="backdrop" onclick="toggleDrawer(false)"></div>
+    <aside id="sidebar" class="sidebar">
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <strong style="font-size:1rem;">⚡ BSTK Chat</strong>
+        <span class="pill"><span id="connDot" class="dot"></span><span id="connText">Connecting</span></span>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Room &amp; Security</div>
+        <div id="sideRoomInfo" style="font-size:0.84rem;"></div>
+        <div style="display:flex; gap:6px;">
+          <button class="btn-ghost" style="flex:1;" onclick="copyInviteLink()">📋 Invite Link</button>
+          <button class="btn-ghost" onclick="leaveToSetup()">Switch</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Online Peers (<span id="peerCount">1</span>)</div>
+        <div id="peerList" class="peer-list"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Decentralized Room Chain</div>
+        <div id="chainInfo" style="font-size:0.8rem; color:var(--muted);">0 block(s)</div>
+        <button class="btn-ghost" onclick="requestSync()">🔗 Sync Peers</button>
+      </div>
+
+      <button id="installBtnSide" class="btn-ghost" style="display:none;" onclick="triggerInstall()">📲 Install App</button>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="btn-ghost menu-btn" onclick="toggleDrawer(true)" aria-label="Menu">☰</button>
+          <span class="room-name" id="roomTitle">#room</span>
+          <span id="e2eeBadge" class="pill">🔓 Public</span>
+        </div>
+        <div class="topbar-right">
+          <button class="btn-ghost" onclick="toggleTheme()" title="Toggle Dark/Light">🌓</button>
+        </div>
+      </header>
+
+      <div id="messages" class="messages"></div>
+      <div id="typingBar" class="typing-bar"></div>
+
+      <footer class="composer">
+        <div class="composer-meta">
+          <select id="dmTarget" class="input" style="width:auto; padding:4px 8px; font-size:0.78rem;">
+            <option value="">Everyone</option>
+          </select>
+          <label class="btn-ghost" style="padding:4px 9px; font-size:0.78rem; cursor:pointer;">
+            📎 Image / File
+            <input id="fileInput" type="file" style="display:none;" onchange="sendFile(this)" />
+          </label>
+        </div>
+        <div class="composer-row">
+          <textarea id="msgInput" rows="1" placeholder="Message..."></textarea>
+          <button class="btn" onclick="sendMessage()">Send</button>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <div id="lightbox" class="lightbox" onclick="this.style.display='none'">
+    <img id="lightboxImg" src="" alt="Preview" />
+  </div>
+
+  <script>
+    const BROKER_WSS = "wss://broker.hivemq.com:8884/mqtt";
+    const MAX_FILE_BYTES = 512 * 1024;
+    const GENESIS_HASH = "GENESIS";
+
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+
+    let client = null;
+    let myNick = "";
+    let myRoom = "";
+    let myPass = "";
+    let myStatus = "Active";
+    let aesKey = null;
+    let topics = {};
+    let peers = {};
+    let typingPeers = {};
+    let chain = [];
+    let seenIds = new Set();
+    let lastTypingSent = 0;
+    let deferredInstallPrompt = null;
+
+    // Theme & PWA Registration
+    const savedTheme = localStorage.getItem("bstk_theme") || "dark";
+    document.documentElement.setAttribute("data-theme", savedTheme);
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("./sw.js").catch(() => {});
+    }
+    window.addEventListener("beforeinstallprompt", (e) => {
+      e.preventDefault();
+      deferredInstallPrompt = e;
+      document.getElementById("installBtn").style.display = "block";
+      document.getElementById("installBtnSide").style.display = "block";
+    });
+    async function triggerInstall() {
+      if (!deferredInstallPrompt) return;
+      deferredInstallPrompt.prompt();
+      await deferredInstallPrompt.userChoice;
+      deferredInstallPrompt = null;
+      document.getElementById("installBtn").style.display = "none";
+      document.getElementById("installBtnSide").style.display = "none";
+    }
+    function toggleTheme() {
+      const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      localStorage.setItem("bstk_theme", next);
+    }
+    function toggleDrawer(open) {
+      document.getElementById("sidebar").classList.toggle("open", open);
+      document.getElementById("backdrop").classList.toggle("open", open);
+    }
+
+    // Pre-fill saved nick & URL ?room=
+    const urlParams = new URLSearchParams(location.search);
+    document.getElementById("joinNick").value = localStorage.getItem("bstk_nick") || "";
+    document.getElementById("joinRoom").value = urlParams.get("room") || localStorage.getItem("bstk_room") || "";
+
+    function fillRandomRoom() {
+      const adj = ["neon", "cyber", "quantum", "cosmic", "shadow", "hyper", "solar", "golden"];
+      const noun = ["tiger", "falcon", "phoenix", "nebula", "vortex", "beacon", "orbit", "echo"];
+      const n = Math.floor(10 + Math.random() * 90);
+      document.getElementById("joinRoom").value = `${adj[Math.floor(Math.random()*adj.length)]}-${noun[Math.floor(Math.random()*noun.length)]}-${n}`;
+    }
+
+    function sanitizeRoomId(r) {
+      return (r || "").trim().toLowerCase().replace(/[^a-z0-9_-]/g, "_").replace(/^_+|_+$/g, "") || "default";
+    }
+
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function formatMarkdown(raw) {
+      let safe = escapeHtml(raw);
+      safe = safe.replace(/```([\s\S]*?)```/g, (_, code) => `<pre><code>${code.trim()}</code></pre>`);
+      safe = safe.replace(/`([^`]+)`/g, "<code>$1</code>");
+      safe = safe.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      safe = safe.replace(/\n/g, "<br>");
+      return safe;
+    }
+
+    function nowTimeStr() {
+      return new Date().toTimeString().slice(0, 8);
+    }
+
+    function toUrlSafeB64(bytes) {
+      let bin = "";
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_");
+    }
+
+    function fromUrlSafeB64(str) {
+      let b64 = str.replace(/-/g, "+").replace(/_/g, "/");
+      while (b64.length % 4) b64 += "=";
+      const bin = atob(b64);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+
+    async function deriveRoomKey(roomId, password) {
+      const norm = roomId.trim().toLowerCase();
+      const saltBuf = await crypto.subtle.digest("SHA-256", enc.encode(`bstkchat-v2:${norm}`));
+      const salt = new Uint8Array(saltBuf);
+      const secret = enc.encode(`${norm}:${password || ""}`);
+      const rawKey = await scrypt.scrypt(secret, salt, 16384, 8, 1, 32);
+      return crypto.subtle.importKey("raw", rawKey, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+    }
+
+    async function encryptPayload(plaintext, aadStr) {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const ct = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv, additionalData: enc.encode(aadStr) },
+        aesKey,
+        enc.encode(plaintext)
+      );
+      const ctBytes = new Uint8Array(ct);
+      const combined = new Uint8Array(12 + ctBytes.length);
+      combined.set(iv, 0);
+      combined.set(ctBytes, 12);
+      return toUrlSafeB64(combined);
+    }
+
+    async function decryptPayload(token, aadStr) {
+      try {
+        const raw = fromUrlSafeB64(token);
+        if (raw.length <= 12) return { ok: false, text: "[Decryption Failed - Bad Payload]" };
+        const iv = raw.slice(0, 12);
+        const ct = raw.slice(12);
+        const pt = await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv, additionalData: enc.encode(aadStr) },
+          aesKey,
+          ct
+        );
+        return { ok: true, text: dec.decode(pt) };
+      } catch {
+        return { ok: false, text: "[Decryption Failed - Check Password]" };
+      }
+    }
+
+    async function computeBlockHash(b) {
+      const payload = [
+        b.prev_hash || GENESIS_HASH,
+        b.id || "",
+        Number(b.ts || 0).toFixed(6),
+        b.time || "",
+        b.sender || "",
+        b.type || "message",
+        b.ciphertext || "",
+      ].join("|");
+      const buf = await crypto.subtle.digest("SHA-256", enc.encode(payload));
+      return Array.from(new Uint8Array(buf)).map((x) => x.toString(16).padStart(2, "0")).join("");
+    }
+
+    function loadChain() {
+      try {
+        const raw = localStorage.getItem(`bstkchat_chain_${myRoom}`);
+        chain = raw ? JSON.parse(raw) : [];
+        if (!Array.isArray(chain)) chain = [];
+      } catch { chain = []; }
+      seenIds = new Set(chain.map((b) => String(b.id)));
+      updateChainBadge();
+    }
+
+    function saveChain() {
+      try {
+        localStorage.setItem(`bstkchat_chain_${myRoom}`, JSON.stringify(chain.slice(-200)));
+      } catch {}
+      updateChainBadge();
+    }
+
+    async function appendChainBlock(id, ts, timeStr, sender, type, ciphertext) {
+      if (!id || seenIds.has(id)) return;
+      const prev_hash = chain.length ? chain[chain.length - 1].hash : GENESIS_HASH;
+      const block = { id, ts: Number(ts), time: timeStr, sender, type, ciphertext, prev_hash };
+      block.hash = await computeBlockHash(block);
+      chain.push(block);
+      chain.sort((a, b) => a.ts - b.ts || String(a.id).localeCompare(String(b.id)));
+      seenIds.add(id);
+      saveChain();
+    }
+
+    function updateChainBadge() {
+      document.getElementById("chainInfo").textContent = `✓ Valid · ${chain.length} encrypted block(s)`;
+    }
+
+    async function startChat() {
+      const btn = document.getElementById("joinBtn");
+      btn.disabled = true;
+      btn.textContent = "Deriving E2EE key...";
+      try {
+        myNick = document.getElementById("joinNick").value.trim() || `User-${Math.floor(100 + Math.random()*900)}`;
+        myRoom = sanitizeRoomId(document.getElementById("joinRoom").value || "general");
+        myPass = document.getElementById("joinPass").value || "";
+        localStorage.setItem("bstk_nick", myNick);
+        localStorage.setItem("bstk_room", myRoom);
+
+        aesKey = await deriveRoomKey(myRoom, myPass);
+        topics = {
+          msg: `bstkchat/rooms/${myRoom}/messages`,
+          presence: `bstkchat/rooms/${myRoom}/presence`,
+          sync: `bstkchat/rooms/${myRoom}/sync`,
+        };
+        peers = {};
+        typingPeers = {};
+        document.getElementById("messages").innerHTML = "";
+        loadChain();
+
+        document.getElementById("joinScreen").style.display = "none";
+        document.getElementById("app").classList.add("active");
+        document.getElementById("roomTitle").textContent = `#${myRoom}`;
+        document.getElementById("e2eeBadge").textContent = myPass ? "🔒 E2EE" : "🔓 Public";
+        document.getElementById("sideRoomInfo").textContent = `#${myRoom} • ${myPass ? "AES-256-GCM" : "Public"}`;
+        renderPeers();
+
+        // Replay recent local chain
+        for (const b of chain.slice(-25)) {
+          const res = await decryptPayload(b.ciphertext, topics.msg);
+          if (res.ok) appendMessage({ sender: b.sender, text: res.text, time: b.time, own: b.sender === myNick, synced: true });
+        }
+
+        connectMqtt();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Join Room";
+      }
+    }
+
+    function leaveToSetup() {
+      if (client) {
+        try { client.publish(topics.presence, JSON.stringify({ sender: myNick, type: "leave", status: myStatus }), { qos: 1 }); } catch {}
+        client.end(true);
+        client = null;
+      }
+      toggleDrawer(false);
+      document.getElementById("app").classList.remove("active");
+      document.getElementById("joinScreen").style.display = "flex";
+    }
+
+    function connectMqtt() {
+      if (client) client.end(true);
+      const willPayload = JSON.stringify({ sender: myNick, type: "leave", status: myStatus });
+      client = mqtt.connect(BROKER_WSS, {
+        clientId: `bstkweb_${Math.random().toString(16).slice(2, 10)}`,
+        clean: true,
+        reconnectPeriod: 3000,
+        will: { topic: topics.presence, payload: willPayload, qos: 1, retain: false },
+      });
+
+      client.on("connect", () => {
+        setConn(true);
+        client.subscribe([topics.msg, topics.presence, topics.sync], () => {
+          publishPresence("join");
+          setTimeout(requestSync, 500);
+        });
+      });
+
+      client.on("reconnect", () => setConn(false));
+      client.on("close", () => setConn(false));
+
+      client.on("message", async (topic, payloadBuf) => {
+        let p;
+        try { p = JSON.parse(dec.decode(payloadBuf)); } catch { return; }
+        if (!p || typeof p !== "object" || p.sender === myNick) return;
+
+        if (topic === topics.presence) handlePresence(p);
+        else if (topic === topics.msg) await handleMessage(p);
+        else if (topic === topics.sync) await handleSync(p);
+      });
+    }
+
+    function setConn(ok) {
+      document.getElementById("connDot").className = "dot" + (ok ? " ok" : "");
+      document.getElementById("connText").textContent = ok ? "Connected" : "Reconnecting";
+    }
+
+    function publishPresence(type, extra = {}) {
+      if (!client || !client.connected) return;
+      client.publish(topics.presence, JSON.stringify({ sender: myNick, type, status: myStatus, ...extra }), { qos: 1 });
+    }
+
+    function requestSync() {
+      if (!client || !client.connected) return;
+      const known_ids = chain.slice(-500).map((b) => String(b.id));
+      client.publish(topics.sync, JSON.stringify({ sender: myNick, type: "sync_request", known_ids, limit: 100 }), { qos: 1 });
+    }
+
+    function handlePresence(p) {
+      const now = Date.now();
+      const s = String(p.sender || "Peer");
+      const st = String(p.status || "Active");
+      if (p.type === "join") {
+        const isNew = !peers[s];
+        peers[s] = { lastSeen: now, status: st };
+        if (isNew) {
+          appendSystem(`${s} joined the room.`);
+          publishPresence("heartbeat");
+          setTimeout(requestSync, 400);
+        }
+      } else if (p.type === "leave") {
+        delete typingPeers[s];
+        if (peers[s]) { delete peers[s]; appendSystem(`${s} left the room.`); }
+      } else if (p.type === "heartbeat") {
+        peers[s] = { lastSeen: now, status: st };
+      } else if (p.type === "typing") {
+        peers[s] = { lastSeen: now, status: st };
+        typingPeers[s] = now;
+      } else if (p.type === "rename") {
+        const oldN = String(p.old || s), newN = String(p.new || s);
+        delete peers[oldN];
+        peers[newN] = { lastSeen: now, status: st };
+        appendSystem(`${oldN} changed nickname to ${newN}`);
+      }
+      renderPeers();
+    }
+
+    async function handleMessage(p) {
+      const sender = String(p.sender || "Anonymous");
+      const timeStr = String(p.time || nowTimeStr());
+      delete typingPeers[sender];
+      renderPeers();
+
+      const res = await decryptPayload(String(p.text || ""), topics.msg);
+      if (!res.ok) {
+        appendSystem(`⚠ Undecryptable message from ${sender} (check password)`);
+        return;
+      }
+      if (p.type === "file") {
+        try {
+          const f = JSON.parse(res.text);
+          renderFileBubble({ sender, filename: f.filename, b64: f.data, time: timeStr, own: false });
+        } catch {}
+        return;
+      }
+      if (p.type === "dm") {
+        if (p.target === myNick) appendMessage({ sender, text: res.text, time: timeStr, dm: true, own: false });
+        return;
+      }
+      const mention = new RegExp(`(?:^|[\\s@])${myNick.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(res.text);
+      appendMessage({ sender, text: res.text, time: timeStr, mention, own: false });
+      const msgId = String(p.id || `${sender}:${timeStr}:${p.text.slice(0, 16)}`);
+      await appendChainBlock(msgId, p.ts || Date.now() / 1000, timeStr, sender, "message", String(p.text));
+    }
+
+    async function handleSync(p) {
+      if (p.type === "sync_request") {
+        const known = new Set(Array.isArray(p.known_ids) ? p.known_ids.map(String) : []);
+        const missing = chain.filter((b) => !known.has(String(b.id))).slice(-100);
+        if (missing.length && client && client.connected) {
+          client.publish(topics.sync, JSON.stringify({ sender: myNick, type: "sync_response", target: p.sender, blocks: missing }), { qos: 1 });
+        }
+      } else if (p.type === "sync_response" && p.target === myNick && Array.isArray(p.blocks)) {
+        const added = [];
+        for (const b of p.blocks) {
+          if (!b || !b.id || seenIds.has(String(b.id))) continue;
+          if (b.hash !== await computeBlockHash(b)) continue;
+          chain.push(b);
+          seenIds.add(String(b.id));
+          added.push(b);
+        }
+        if (added.length) {
+          chain.sort((a, b) => a.ts - b.ts || String(a.id).localeCompare(String(b.id)));
+          saveChain();
+          appendSystem(`🔗 Synced ${added.length} message(s) from ${p.sender}`);
+          for (const b of added) {
+            const res = await decryptPayload(String(b.ciphertext || ""), topics.msg);
+            if (res.ok) appendMessage({ sender: b.sender, text: res.text, time: b.time, own: b.sender === myNick, synced: true });
+          }
+        }
+      }
+    }
+
+    async function sendMessage() {
+      const box = document.getElementById("msgInput");
+      const text = box.value.trim();
+      if (!text || !client) return;
+      box.value = "";
+      const target = document.getElementById("dmTarget").value;
+      const timeStr = nowTimeStr();
+      const ts = Date.now() / 1000;
+      const id = crypto.randomUUID ? crypto.randomUUID().replace(/-/g, "") : Math.random().toString(16).slice(2);
+      const cipher = await encryptPayload(text, topics.msg);
+      const payload = target
+        ? { id, ts, sender: myNick, type: "dm", target, text: cipher, time: timeStr }
+        : { id, ts, sender: myNick, type: "message", text: cipher, time: timeStr };
+      client.publish(topics.msg, JSON.stringify(payload), { qos: 1 });
+
+      if (target) appendMessage({ sender: myNick, text, time: timeStr, dm: true, target, own: true });
+      else {
+        appendMessage({ sender: myNick, text, time: timeStr, own: true });
+        await appendChainBlock(id, ts, timeStr, myNick, "message", cipher);
+      }
+    }
+
+    function sendFile(input) {
+      const file = input.files[0];
+      if (!file) return;
+      if (file.size > MAX_FILE_BYTES) { alert("Max file size is 512 KB."); input.value = ""; return; }
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const b64 = reader.result.split(",")[1];
+        const json = JSON.stringify({ filename: file.name, data: b64 });
+        const cipher = await encryptPayload(json, topics.msg);
+        const timeStr = nowTimeStr();
+        client.publish(topics.msg, JSON.stringify({ sender: myNick, type: "file", text: cipher, time: timeStr }), { qos: 1 });
+        renderFileBubble({ sender: myNick, filename: file.name, b64, time: timeStr, own: true });
+        input.value = "";
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function renderFileBubble({ sender, filename, b64, time, own }) {
+      const msgEl = document.getElementById("messages");
+      const div = document.createElement("div");
+      div.className = "msg" + (own ? " own" : "");
+      const safeName = escapeHtml(filename);
+      const isImg = /\.(png|jpe?g|gif|webp)$/i.test(filename);
+      const dataUrl = `data:${isImg ? "image/" + filename.split(".").pop().toLowerCase().replace("jpg", "jpeg") : "application/octet-stream"};base64,${b64}`;
+      const body = isImg
+        ? `<img class="chat-img" src="${dataUrl}" alt="${safeName}" onclick="openLightbox('${dataUrl}')" /><a class="btn-ghost" style="text-decoration:none; display:inline-block;" href="${dataUrl}" download="${safeName}">⬇ Download</a>`
+        : `<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;"><span>📄 <strong>${safeName}</strong></span><a class="btn-ghost" style="text-decoration:none;" href="${dataUrl}" download="${safeName}">⬇ Download</a></div>`;
+      div.innerHTML = `<div class="msg-head"><span class="msg-sender">${escapeHtml(own ? sender + " (You)" : sender)}</span><span class="msg-time">${escapeHtml(time)}</span></div>${body}`;
+      msgEl.appendChild(div);
+      msgEl.scrollTop = msgEl.scrollHeight;
+    }
+
+    function openLightbox(src) {
+      document.getElementById("lightboxImg").src = src;
+      document.getElementById("lightbox").style.display = "flex";
+    }
+
+    function appendMessage({ sender, text, time, own, dm, target, mention, synced }) {
+      const msgEl = document.getElementById("messages");
+      const div = document.createElement("div");
+      const cls = ["msg"];
+      if (own) cls.push("own");
+      if (dm) cls.push("dm");
+      if (mention) cls.push("mention");
+      div.className = cls.join(" ");
+      const badge = dm ? `<span class="pill">🔒 DM ${own ? "to " + escapeHtml(target) : ""}</span>` : synced ? `<span class="pill">🔗 Synced</span>` : "";
+      div.innerHTML = `<div class="msg-head"><span class="msg-sender">${escapeHtml(own ? sender + " (You)" : sender)}</span>${badge}<span class="msg-time">${escapeHtml(time || "")}</span></div><div class="msg-body">${formatMarkdown(text)}</div>`;
+      msgEl.appendChild(div);
+      msgEl.scrollTop = msgEl.scrollHeight;
+    }
+
+    function appendSystem(text) {
+      const msgEl = document.getElementById("messages");
+      const div = document.createElement("div");
+      div.className = "msg system";
+      div.textContent = text;
+      msgEl.appendChild(div);
+      msgEl.scrollTop = msgEl.scrollHeight;
+    }
+
+    function renderPeers() {
+      const now = Date.now();
+      const list = document.getElementById("peerList");
+      const dm = document.getElementById("dmTarget");
+      const prev = dm.value;
+      const names = Object.keys(peers).sort((a, b) => a.localeCompare(b));
+      document.getElementById("peerCount").textContent = String(names.length + 1);
+      list.innerHTML = `<div class="peer-item"><span><strong>${escapeHtml(myNick)}</strong> (You)</span><span style="color:var(--muted); font-size:0.74rem;">${escapeHtml(myStatus)}</span></div>`;
+      dm.innerHTML = `<option value="">Everyone</option>`;
+      for (const n of names) {
+        const el = document.createElement("div");
+        el.className = "peer-item";
+        el.onclick = () => { dm.value = n; toggleDrawer(false); document.getElementById("msgInput").focus(); };
+        el.innerHTML = `<span>${escapeHtml(n)}</span><span style="color:var(--muted); font-size:0.74rem;">${escapeHtml(peers[n].status)}</span>`;
+        list.appendChild(el);
+        const opt = document.createElement("option");
+        opt.value = n;
+        opt.textContent = `DM → ${n}`;
+        dm.appendChild(opt);
+      }
+      dm.value = prev;
+      const typers = Object.keys(typingPeers).filter((n) => now - typingPeers[n] < 5000);
+      document.getElementById("typingBar").textContent = typers.length ? `✎ ${typers.join(", ")} typing...` : "";
+    }
+
+    function copyInviteLink() {
+      const link = `${location.origin}${location.pathname}?room=${encodeURIComponent(myRoom)}`;
+      navigator.clipboard?.writeText(link);
+      appendSystem("Copied mobile invite link: " + link);
+      toggleDrawer(false);
+    }
+
+    document.getElementById("msgInput").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      } else if (Date.now() - lastTypingSent > 3000) {
+        lastTypingSent = Date.now();
+        publishPresence("typing");
+      }
+    });
+
+    setInterval(() => {
+      if (!client) return;
+      publishPresence("heartbeat");
+      const now = Date.now();
+      for (const n of Object.keys(peers)) {
+        if (now - peers[n].lastSeen > 45000) { delete peers[n]; appendSystem(`${n} timed out.`); }
+      }
+      renderPeers();
+    }, 15000);
+  </script>
+</body>
+</html>
