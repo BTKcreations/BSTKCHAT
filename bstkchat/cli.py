@@ -45,6 +45,7 @@ from bstkchat.config import (
     MAX_FILE_BYTES,
     VALID_THEMES,
     load_config,
+    record_recent_room,
     save_config,
     save_received_file,
     search_log,
@@ -57,7 +58,7 @@ from bstkchat.crypto import (
     sanitize_room_id,
 )
 
-APP_VERSION = "2.4.3"
+APP_VERSION = "2.5.0"
 AUTO_AWAY_SECONDS = 300
 TYPING_TTL_SECONDS = 5.0
 TYPING_THROTTLE_SECONDS = 3.0
@@ -96,6 +97,9 @@ COMMANDS = [
     ("/room", "Switch room: /room <id> [password|--lock]"),
     ("/nick", "Change nickname: /nick <name>"),
     ("/msg", "Send private DM: /msg <user> <message>"),
+    ("/reply", "Reply to last message: /reply <text>"),
+    ("/react", "React to last message: /react <emoji>"),
+    ("/delete", "Delete your last sent message"),
     ("/send", "Send encrypted file: /send <filepath>"),
     ("/accept", "Accept pending file: /accept [id]"),
     ("/status", "Set status: /status <text>"),
@@ -268,6 +272,13 @@ class ChatClient:
         self.pending_files: Dict[str, Dict[str, object]] = {}
         self.shared_files: Dict[str, Dict[str, object]] = {}
         self._file_seq = 0
+        self.reactions: Dict[str, Dict[str, List[str]]] = {}
+        self.edited_msgs: Dict[str, str] = {}
+        self.deleted_msgs: set = set()
+        self.msg_acks: Dict[str, str] = {}
+        self.msg_owners: Dict[str, str] = {}
+        self._last_msg_info: Optional[Dict[str, str]] = None
+        self._last_own_msg_id: Optional[str] = None
 
         self.running = True
         self.connected = False
@@ -286,6 +297,8 @@ class ChatClient:
         self.console = Console(force_terminal=True)
         self.client: Optional[mqtt.Client] = None
         self.chain = RoomChain(self.room_id, enabled=store_chain)
+        if store_chain:
+            record_recent_room(self.room_id, self.nickname, bool(self.password))
         self._update_topics(self.room_id)
 
     def _update_topics(self, room_id: str) -> None:
@@ -340,6 +353,9 @@ class ChatClient:
                 for fid, info in self.pending_files.items()
             ]
             recent = list(self._recent_events)
+            recent_rooms = load_config().get("recent_rooms", [])
+            if not isinstance(recent_rooms, list):
+                recent_rooms = []
             return {
                 "version": APP_VERSION,
                 "nickname": self.nickname,
@@ -358,6 +374,11 @@ class ChatClient:
                 },
                 "pending_files": pending,
                 "recent_events": recent,
+                "recent_rooms": recent_rooms,
+                "reactions": {k: dict(v) for k, v in self.reactions.items()},
+                "msg_acks": dict(self.msg_acks),
+                "edited_msgs": dict(self.edited_msgs),
+                "deleted_msgs": list(self.deleted_msgs),
             }
 
     def record_activity(self) -> None:
@@ -664,6 +685,32 @@ class ChatClient:
             self._handle_incoming_file(sender, decrypted_text)
             return
 
+        if msg_type == "reaction":
+            target_id = str(payload.get("target_id", ""))
+            if target_id:
+                self._apply_reaction(target_id, decrypted_text, sender)
+            return
+
+        if msg_type == "edit":
+            target_id = str(payload.get("target_id", ""))
+            if target_id and self.msg_owners.get(target_id, sender) == sender:
+                with self._lock:
+                    self.edited_msgs[target_id] = decrypted_text
+                self.print_system(
+                    f"✏️  [bold {color}]{safe_sender}[/] edited a message: {escape_markup(decrypted_text)}"
+                )
+                self._emit_event("message_edit", {"id": target_id, "text": decrypted_text, "sender": sender})
+            return
+
+        if msg_type == "delete":
+            target_id = str(payload.get("target_id", ""))
+            if target_id and self.msg_owners.get(target_id, sender) == sender:
+                with self._lock:
+                    self.deleted_msgs.add(target_id)
+                self.print_system(f"🗑️  [bold {color}]{safe_sender}[/] deleted a message.")
+                self._emit_event("message_delete", {"id": target_id, "sender": sender})
+            return
+
         if msg_type == "dm":
             target = str(payload.get("target", ""))
             if target == self.nickname:
@@ -672,6 +719,7 @@ class ChatClient:
                 self._emit_event(
                     "message",
                     {
+                        "id": str(payload.get("id") or uuid.uuid4().hex),
                         "sender": sender,
                         "color": color,
                         "text": decrypted_text,
@@ -685,7 +733,22 @@ class ChatClient:
                 self._ring_bell()
             return
 
+        msg_id = str(
+            payload.get("id")
+            or hashlib.sha256(f"{sender}:{timestamp}:{encrypted_text}".encode("utf-8")).hexdigest()
+        )
+        reply_info = self._decrypt_reply_meta(payload.get("reply_to"), key, topic.encode("utf-8"))
+
+        with self._lock:
+            self.msg_owners[msg_id] = sender
+            self._last_msg_info = {"id": msg_id, "sender": sender, "preview": decrypted_text[:80]}
+
         mentioned = is_user_mentioned(decrypted_text, self.nickname)
+        if reply_info:
+            self.safe_print(
+                f"[dim italic]  ↪ Replying to {escape_markup(reply_info['sender'])}: "
+                f"{escape_markup(reply_info['preview'])}[/]"
+            )
         self._render_incoming_text(timestamp, sender, decrypted_text, is_mention=mentioned)
         if mentioned:
             self.write_to_log(f"Mentioned by {sender}: {decrypted_text}")
@@ -696,23 +759,22 @@ class ChatClient:
         self._emit_event(
             "message",
             {
+                "id": msg_id,
                 "sender": sender,
                 "color": color,
                 "text": decrypted_text,
                 "time": timestamp,
                 "mention": mentioned,
+                "reply_to": reply_info,
                 "own": False,
             },
             record_history=True,
         )
 
         if msg_type == "message":
-            msg_id = str(
-                payload.get("id")
-                or hashlib.sha256(f"{sender}:{timestamp}:{encrypted_text}".encode("utf-8")).hexdigest()
-            )
             ts = float(payload.get("ts") or time.time())
             self.chain.append_message(msg_id, ts, timestamp, sender, "message", encrypted_text)
+            self.send_ack(msg_id, "delivered")
             self._emit_event("state_update", self.get_web_state())
 
     def request_sync(self, limit: int = 100) -> None:
@@ -734,6 +796,17 @@ class ChatClient:
 
     def handle_sync(self, sender: str, msg_type: str, payload: dict, sync_topic: str) -> None:
         """Handles decentralized peer-to-peer room chain sync requests and responses."""
+        if msg_type == "ack":
+            target_id = str(payload.get("target_id", ""))
+            ack_status = str(payload.get("status", "delivered"))
+            if target_id and ack_status in ("delivered", "read"):
+                with self._lock:
+                    cur = self.msg_acks.get(target_id, "sent")
+                    if cur != "read":
+                        self.msg_acks[target_id] = ack_status
+                self._emit_event("ack_update", {"id": target_id, "status": ack_status})
+            return
+
         if not self.chain.enabled:
             return
 
@@ -1008,12 +1081,80 @@ class ChatClient:
         except Exception:
             pass
 
+    def _decrypt_reply_meta(
+        self, raw_reply: Any, key: bytes, aad: bytes
+    ) -> Optional[Dict[str, str]]:
+        if not isinstance(raw_reply, dict):
+            return None
+        rid = str(raw_reply.get("id", ""))
+        rsender = str(raw_reply.get("sender", ""))
+        enc_prev = str(raw_reply.get("preview", ""))
+        ok, prev = decrypt_message(enc_prev, key, aad=aad)
+        if not ok:
+            prev = str(raw_reply.get("plain_preview", ""))
+        return {"id": rid, "sender": rsender, "preview": prev[:80]}
+
+    def _apply_reaction(self, target_id: str, emoji: str, sender: str) -> None:
+        with self._lock:
+            by_emoji = self.reactions.setdefault(target_id, {})
+            users = by_emoji.setdefault(emoji, [])
+            if sender in users:
+                users.remove(sender)
+                if not users:
+                    del by_emoji[emoji]
+            else:
+                users.append(sender)
+            snapshot = {k: list(v) for k, v in by_emoji.items()}
+        self._emit_event("reaction_update", {"id": target_id, "reactions": snapshot})
+
+    def send_ack(self, target_id: str, status: str = "delivered") -> None:
+        if not self.client or not target_id:
+            return
+        with self._lock:
+            topic = self.sync_topic
+        try:
+            self.client.publish(
+                topic,
+                json.dumps({"sender": self.nickname, "type": "ack", "target_id": target_id, "status": status}),
+                qos=0,
+            )
+        except Exception:
+            pass
+
+    def send_reaction(self, target_id: str, emoji: str) -> bool:
+        if not target_id or not emoji.strip():
+            return False
+        if self._publish_encrypted("reaction", emoji.strip(), extra={"target_id": target_id}):
+            self._apply_reaction(target_id, emoji.strip(), self.nickname)
+            return True
+        return False
+
+    def send_edit(self, target_id: str, new_text: str) -> bool:
+        if not target_id or not new_text.strip():
+            return False
+        if self._publish_encrypted("edit", new_text.strip(), extra={"target_id": target_id}):
+            with self._lock:
+                self.edited_msgs[target_id] = new_text.strip()
+            self._emit_event("message_edit", {"id": target_id, "text": new_text.strip(), "sender": self.nickname})
+            return True
+        return False
+
+    def send_delete(self, target_id: str) -> bool:
+        if not target_id:
+            return False
+        if self._publish_encrypted("delete", "[deleted]", extra={"target_id": target_id}):
+            with self._lock:
+                self.deleted_msgs.add(target_id)
+            self._emit_event("message_delete", {"id": target_id, "sender": self.nickname})
+            return True
+        return False
+
     def _publish_encrypted(
         self, msg_type: str, text: str, extra: Optional[dict] = None
-    ) -> bool:
+    ) -> Optional[str]:
         """Encrypts text with AES-256-GCM and publishes to the room's message topic."""
         if not self.client:
-            return False
+            return None
 
         with self._lock:
             key = self.secret_key
@@ -1023,7 +1164,7 @@ class ChatClient:
         now_str = datetime.now().strftime("%H:%M:%S")
         msg_id = uuid.uuid4().hex
         encrypted_text = encrypt_payload(text, key, aad=topic.encode("utf-8"))
-        payload = {
+        payload: Dict[str, Any] = {
             "id": msg_id,
             "ts": now_ts,
             "sender": self.nickname,
@@ -1032,22 +1173,42 @@ class ChatClient:
             "time": now_str,
         }
         if extra:
+            if isinstance(extra.get("reply_to"), dict):
+                r = extra["reply_to"]
+                extra = dict(extra)
+                extra["reply_to"] = {
+                    "id": str(r.get("id", "")),
+                    "sender": str(r.get("sender", "")),
+                    "preview": encrypt_payload(str(r.get("preview", ""))[:80], key, aad=topic.encode("utf-8")),
+                }
             payload.update(extra)
 
         try:
             self.client.publish(topic, json.dumps(payload), qos=1)
             if msg_type == "message":
                 self.chain.append_message(msg_id, now_ts, now_str, self.nickname, "message", encrypted_text)
-            return True
+            return msg_id
         except Exception as exc:
             self.print_system(f"Error sending message: {escape_markup(str(exc))}")
-            return False
+            return None
 
-    def send_chat_message(self, text: str) -> None:
+    def send_chat_message(self, text: str, reply_to: Optional[Dict[str, str]] = None) -> Optional[str]:
         """Broadcasts an encrypted text chat message."""
         self.record_activity()
-        if self._publish_encrypted("message", text):
+        extra = {"reply_to": reply_to} if reply_to else None
+        msg_id = self._publish_encrypted("message", text, extra=extra)
+        if msg_id:
             timestamp = datetime.now().strftime("%H:%M:%S")
+            with self._lock:
+                self.msg_acks[msg_id] = "sent"
+                self.msg_owners[msg_id] = self.nickname
+                self._last_own_msg_id = msg_id
+                self._last_msg_info = {"id": msg_id, "sender": self.nickname, "preview": text[:80]}
+            if reply_to:
+                self.safe_print(
+                    f"[dim italic]  ↪ Replying to {escape_markup(str(reply_to.get('sender', '')))}: "
+                    f"{escape_markup(str(reply_to.get('preview', '')))}[/]"
+                )
             if self.compact_mode:
                 self.safe_print(
                     f"[dim gray][{timestamp}][/] [bold green]<You>[/] {escape_markup(text)}"
@@ -1061,15 +1222,19 @@ class ChatClient:
             self._emit_event(
                 "message",
                 {
+                    "id": msg_id,
                     "sender": self.nickname,
                     "color": get_user_color(self.nickname),
                     "text": text,
                     "time": timestamp,
+                    "reply_to": reply_to,
+                    "ack": "sent",
                     "own": True,
                 },
                 record_history=True,
             )
             self._emit_event("state_update", self.get_web_state())
+        return msg_id
 
     def send_private_message(self, target: str, text: str) -> None:
         """Sends an encrypted Direct Message to a specific user in the room."""
@@ -1132,6 +1297,16 @@ class ChatClient:
             self.typing_peers.clear()
             self.pending_files.clear()
             self.shared_files.clear()
+            self.reactions.clear()
+            self.edited_msgs.clear()
+            self.deleted_msgs.clear()
+            self.msg_acks.clear()
+            self.msg_owners.clear()
+            self._last_msg_info = None
+            self._last_own_msg_id = None
+            self._recent_events.clear()
+            if self.chain.enabled:
+                record_recent_room(sanitized_room, self.nickname, bool(new_password))
             new_msg_topic = self.msg_topic
             new_presence_topic = self.presence_topic
             new_sync_topic = self.sync_topic
@@ -1579,6 +1754,29 @@ def main(argv: Optional[List[str]] = None) -> None:
                             chat.print_system("Usage: /msg <recipient_name> <message>")
                         else:
                             chat.send_private_message(parts[1], " ".join(parts[2:]))
+
+                    elif cmd == "/reply":
+                        if len(parts) < 2:
+                            chat.print_system("Usage: /reply <message>")
+                        elif not chat._last_msg_info:
+                            chat.print_system("No recent message to reply to.")
+                        else:
+                            chat.send_chat_message(" ".join(parts[1:]), reply_to=chat._last_msg_info)
+
+                    elif cmd == "/react":
+                        if len(parts) < 2:
+                            chat.print_system("Usage: /react <emoji>")
+                        elif not chat._last_msg_info:
+                            chat.print_system("No recent message to react to.")
+                        else:
+                            chat.send_reaction(chat._last_msg_info["id"], parts[1])
+
+                    elif cmd == "/delete":
+                        if not chat._last_own_msg_id:
+                            chat.print_system("No recent message of yours to delete.")
+                        else:
+                            chat.send_delete(chat._last_own_msg_id)
+                            chat.print_system("🗑️  Deleted your last message.")
 
                     elif cmd == "/send":
                         if len(parts) < 2:

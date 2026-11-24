@@ -100,3 +100,42 @@ def test_web_file_preview_inline_image_and_attachment():
             assert "attachment;" in resp.headers["Content-Disposition"]
     finally:
         server.stop()
+
+
+def test_web_whatsapp_features_react_edit_delete_ack_and_audio():
+    chat = ChatClient("Alice", "wa-room", "pw", store_chain=False)
+    chat.client = MagicMock()
+    chat.safe_print = MagicMock()
+    chat.write_to_log = MagicMock()
+
+    msg_id = chat.send_chat_message("original", reply_to={"id": "0", "sender": "Bob", "preview": "hi"})
+    assert msg_id is not None
+    assert chat.send_file_bytes("note.webm", b"OggSfakeaudio") is True
+
+    server = WebServer(chat, port=0)
+    url = server.start()
+    try:
+        base_url, token_part = url.split("/?token=")
+        headers = {"X-BSTK-Token": token_part, "Content-Type": "application/json"}
+
+        for path, body in [
+            ("/api/react", {"target_id": msg_id, "emoji": "👍"}),
+            ("/api/edit", {"target_id": msg_id, "text": "edited text"}),
+            ("/api/ack", {"target_id": msg_id, "status": "read"}),
+            ("/api/delete", {"target_id": msg_id}),
+        ]:
+            req = urllib.request.Request(
+                f"{base_url}{path}", data=json.dumps(body).encode("utf-8"), headers=headers, method="POST"
+            )
+            with urllib.request.urlopen(req) as resp:
+                assert json.loads(resp.read().decode("utf-8"))["ok"] is True
+
+        assert chat.edited_msgs[msg_id] == "edited text"
+        assert msg_id in chat.deleted_msgs
+        assert "👍" in chat.reactions[msg_id]
+
+        with urllib.request.urlopen(f"{base_url}/api/file/preview?id=1&token={token_part}") as resp:
+            assert resp.headers["Content-Type"] == "audio/webm"
+            assert "inline;" in resp.headers["Content-Disposition"]
+    finally:
+        server.stop()

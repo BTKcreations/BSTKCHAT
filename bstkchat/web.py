@@ -24,6 +24,13 @@ SAFE_INLINE_IMAGES = {
     ".gif": "image/gif",
     ".webp": "image/webp",
 }
+SAFE_INLINE_AUDIO = {
+    ".webm": "audio/webm",
+    ".ogg": "audio/ogg",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+}
 
 
 def _load_web_html() -> bytes:
@@ -154,8 +161,9 @@ class WebServer:
                     filename = sanitize_filename(str(entry["filename"]))
                     ext = os.path.splitext(filename)[1].lower()
                     raw_bytes = bytes(entry["data"])
-                    mime = SAFE_INLINE_IMAGES.get(ext, "application/octet-stream")
-                    is_inline = (ext in SAFE_INLINE_IMAGES) and not force_download
+                    safe_media = {**SAFE_INLINE_IMAGES, **SAFE_INLINE_AUDIO}
+                    mime = safe_media.get(ext, "application/octet-stream")
+                    is_inline = (ext in safe_media) and not force_download
                     disp = f'inline; filename="{filename}"' if is_inline else f'attachment; filename="{filename}"'
 
                     self.send_response(HTTPStatus.OK)
@@ -214,13 +222,41 @@ class WebServer:
                 if parsed.path == "/api/send":
                     text = str(data.get("text", "")).strip()
                     target = str(data.get("target", "")).strip()
+                    reply_to = data.get("reply_to") if isinstance(data.get("reply_to"), dict) else None
                     if not text:
                         self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Empty message"})
                         return
                     if target:
                         chat.send_private_message(target, text)
                     else:
-                        chat.send_chat_message(text)
+                        chat.send_chat_message(text, reply_to=reply_to)
+                    self._send_json(HTTPStatus.OK, {"ok": True})
+                    return
+
+                if parsed.path == "/api/react":
+                    target_id = str(data.get("target_id", "")).strip()
+                    emoji = str(data.get("emoji", "")).strip()
+                    ok = chat.send_reaction(target_id, emoji)
+                    self._send_json(HTTPStatus.OK, {"ok": ok})
+                    return
+
+                if parsed.path == "/api/edit":
+                    target_id = str(data.get("target_id", "")).strip()
+                    text = str(data.get("text", "")).strip()
+                    ok = chat.send_edit(target_id, text)
+                    self._send_json(HTTPStatus.OK, {"ok": ok})
+                    return
+
+                if parsed.path == "/api/delete":
+                    target_id = str(data.get("target_id", "")).strip()
+                    ok = chat.send_delete(target_id)
+                    self._send_json(HTTPStatus.OK, {"ok": ok})
+                    return
+
+                if parsed.path == "/api/ack":
+                    target_id = str(data.get("target_id", "")).strip()
+                    status = str(data.get("status", "read"))
+                    chat.send_ack(target_id, status)
                     self._send_json(HTTPStatus.OK, {"ok": True})
                     return
 

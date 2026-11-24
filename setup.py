@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="bstkchat",
-    version="2.4.3",
+    version="2.5.0",
     packages=find_packages(),
     package_data={"bstkchat": ["*.html"]},
     install_requires=[

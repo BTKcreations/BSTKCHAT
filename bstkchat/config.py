@@ -39,6 +39,23 @@ def save_config(config: Dict[str, Any]) -> None:
         pass
 
 
+def record_recent_room(room_id: str, nickname: str, has_password: bool) -> List[Dict[str, Any]]:
+    """Updates the recent rooms list in config.json (never stores passwords)."""
+    cfg = load_config()
+    recent = cfg.get("recent_rooms", [])
+    if not isinstance(recent, list):
+        recent = []
+    recent = [r for r in recent if isinstance(r, dict) and r.get("room_id") != room_id]
+    recent.insert(0, {
+        "room_id": room_id,
+        "nickname": nickname,
+        "has_password": bool(has_password),
+    })
+    cfg["recent_rooms"] = recent[:10]
+    save_config(cfg)
+    return cfg["recent_rooms"]
+
+
 def sanitize_filename(filename: str) -> str:
     """Strips directory components and unsafe characters from an incoming filename."""
     base = os.path.basename(filename.strip())

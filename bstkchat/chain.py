@@ -143,6 +143,13 @@ class RoomChain:
         with self._lock:
             return list(self.blocks[-limit:])
 
+    def get_block(self, msg_id: str) -> Optional[dict]:
+        with self._lock:
+            for block in self.blocks:
+                if str(block.get("id")) == msg_id:
+                    return dict(block)
+            return None
+
     def verify_integrity(self) -> Tuple[bool, int]:
         """Verifies every block's SHA-256 hash in the local chain."""
         with self._lock:
