@@ -129,3 +129,9 @@ Alice > /log off
 - **Password-protected rooms** derive a 256-bit key with `scrypt` and encrypt each message using **AES-256-GCM** with a unique random 96-bit nonce and room-topic AAD.
 - **Public rooms (no password)** still use a room-derived key for transport formatting, so anyone who knows the Room ID can read messages—always set a password for confidential chats.
 - **Local logs** are stored in plain text under `~/.bstkchat/logs/` when logging is enabled; use `/log off` if you do not want transcripts saved to disk.
+
+---
+
+## Contributing
+
+BSTK Chat is free and open-source (MIT License). Contributions are welcome from everyone—see [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
