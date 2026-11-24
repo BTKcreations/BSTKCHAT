@@ -57,7 +57,7 @@ from bstkchat.crypto import (
     sanitize_room_id,
 )
 
-APP_VERSION = "2.4.2"
+APP_VERSION = "2.4.3"
 AUTO_AWAY_SECONDS = 300
 TYPING_TTL_SECONDS = 5.0
 TYPING_THROTTLE_SECONDS = 3.0
@@ -488,7 +488,9 @@ class ChatClient:
         self.client.subscribe(presence_topic)
         self.client.subscribe(sync_topic)
         self.send_presence("join")
-        self.request_sync()
+        t = threading.Timer(0.6, self.request_sync)
+        t.daemon = True
+        t.start()
         self._emit_event("state_update", self.get_web_state())
 
     def on_disconnect(self, client, userdata, rc, *args, **kwargs) -> None:
@@ -547,6 +549,9 @@ class ChatClient:
                 )
                 self.send_presence("heartbeat")
                 self._emit_event("system", {"text": f"{sender} joined the room.", "time": datetime.now().strftime("%H:%M:%S")}, record_history=True)
+                t = threading.Timer(0.4, self.request_sync)
+                t.daemon = True
+                t.start()
             self._emit_event("state_update", self.get_web_state())
 
         elif msg_type == "leave":
@@ -794,7 +799,7 @@ class ChatClient:
                     )
             self._emit_event("state_update", self.get_web_state())
 
-    def replay_recent_chain(self, limit: int = 10) -> None:
+    def replay_recent_chain(self, limit: int = 25) -> None:
         """Displays recent decrypted blocks from the local room chain on join."""
         if not self.chain.enabled:
             return
@@ -810,10 +815,24 @@ class ChatClient:
             if ok:
                 if rendered == 0:
                     self.print_system(f"⛓️  Loaded {len(recent)} recent block(s) from local room chain:")
+                b_sender = str(block.get("sender", "Peer"))
+                b_time = str(block.get("time", "--:--:--"))
                 self._render_incoming_text(
-                    escape_markup(str(block.get("time", "--:--:--"))),
-                    str(block.get("sender", "Peer")),
+                    escape_markup(b_time),
+                    b_sender,
                     text,
+                )
+                self._emit_event(
+                    "message",
+                    {
+                        "sender": b_sender,
+                        "color": get_user_color(b_sender),
+                        "text": text,
+                        "time": b_time,
+                        "synced": True,
+                        "own": b_sender == self.nickname,
+                    },
+                    record_history=True,
                 )
                 rendered += 1
 
@@ -1125,8 +1144,10 @@ class ChatClient:
 
         self.clear_screen()
         self.print_room_banner()
-        self.replay_recent_chain(10)
-        self.request_sync()
+        self.replay_recent_chain(25)
+        t = threading.Timer(0.6, self.request_sync)
+        t.daemon = True
+        t.start()
         self._emit_event("state_update", self.get_web_state())
 
     def print_room_banner(self) -> None:
@@ -1455,6 +1476,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.web:
         from bstkchat.web import WebServer
 
+        chat.replay_recent_chain(25)
         web_server = WebServer(chat, port=args.web_port)
         url = web_server.start()
         chat.safe_print(
@@ -1483,7 +1505,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     chat.clear_screen()
     chat.print_room_banner()
-    chat.replay_recent_chain(10)
+    chat.replay_recent_chain(25)
 
     dynamic_style = DynamicStyle(
         lambda: PromptStyle.from_dict(THEME_STYLES.get(chat.theme, THEME_STYLES["dark"]))

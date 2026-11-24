@@ -67,3 +67,18 @@ def test_peer_sync_request_and_response_between_clients(tmp_path):
     bob.handle_sync("Alice", "sync_response", sync_resp, bob.sync_topic)
     assert bob.chain.get_known_ids() == ["id1", "id2"]
     assert bob.chain.verify_integrity() == (True, 2)
+
+
+def test_replay_recent_chain_populates_web_recent_events(tmp_path):
+    client = ChatClient("Alice", "replay-room", "pw", store_chain=False)
+    client.chain = RoomChain("replay-room", store_dir=str(tmp_path))
+    client.safe_print = MagicMock()
+    client.write_to_log = MagicMock()
+
+    c1 = encrypt_payload("past message", client.secret_key, aad=client.msg_topic.encode("utf-8"))
+    client.chain.append_message("m1", 10.0, "01:00:00", "Bob", "message", c1)
+
+    client.replay_recent_chain(25)
+    state = client.get_web_state()
+    assert len(state["recent_events"]) == 1
+    assert state["recent_events"][0]["data"]["text"] == "past message"
