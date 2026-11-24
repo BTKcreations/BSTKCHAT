@@ -57,7 +57,7 @@ from bstkchat.crypto import (
     sanitize_room_id,
 )
 
-APP_VERSION = "2.4.1"
+APP_VERSION = "2.4.2"
 AUTO_AWAY_SECONDS = 300
 TYPING_TTL_SECONDS = 5.0
 TYPING_THROTTLE_SECONDS = 3.0

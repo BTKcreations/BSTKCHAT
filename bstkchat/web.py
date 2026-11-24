@@ -7,6 +7,7 @@ import json
 import os
 import queue
 import secrets
+import sys
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,6 +41,18 @@ def _load_web_html() -> bytes:
             return f.read()
 
 
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that suppresses benign browser socket-abort tracebacks."""
+
+    def handle_error(self, request, client_address):
+        _, exc, _ = sys.exc_info()
+        if isinstance(exc, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+            return
+        if isinstance(exc, OSError) and getattr(exc, "winerror", None) in (10053, 10054):
+            return
+        super().handle_error(request, client_address)
+
+
 class WebServer:
     """Localhost-only HTTP + SSE server bound to 127.0.0.1 with per-session token auth."""
 
@@ -63,6 +76,12 @@ class WebServer:
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
+
+            def handle(self):
+                try:
+                    super().handle()
+                except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                    pass
 
             def log_message(self, format, *args):
                 # Suppress noisy stdout access logs so terminal TUI stays clean
@@ -273,7 +292,7 @@ class WebServer:
 
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
-        self._httpd = ThreadingHTTPServer((self.host, self.port), Handler)
+        self._httpd = QuietThreadingHTTPServer((self.host, self.port), Handler)
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._thread.start()
         return self.url
