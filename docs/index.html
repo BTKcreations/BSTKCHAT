@@ -138,6 +138,33 @@
     }
     .join-sub { font-size: 0.84rem; color: var(--muted); line-height: 1.45; }
     .field-label { font-size: 0.75rem; font-weight: 600; color: var(--muted); margin-bottom: 4px; display: block; }
+    .recent-section { display: none; flex-direction: column; gap: 8px; margin-top: 4px; }
+    .recent-list { display: flex; flex-direction: column; gap: 7px; max-height: 190px; overflow-y: auto; }
+    .recent-card {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      text-align: left;
+      transition: border-color 0.15s ease;
+    }
+    .recent-card:hover, .recent-card:active { border-color: var(--accent); }
+    .recent-meta { font-size: 0.74rem; color: var(--muted); margin-top: 2px; }
+    .recent-del {
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 4px 7px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+    }
+    .recent-del:hover { color: var(--text); background: var(--bg); }
 
     /* App Shell (Mobile-First) */
     .app {
@@ -366,6 +393,10 @@
         <input id="joinPass" class="input" type="password" placeholder="Leave empty for public room" />
       </div>
       <button id="joinBtn" class="btn" type="button" onclick="startChat()">Join Room</button>
+      <div id="recentSection" class="recent-section">
+        <span class="field-label" style="margin-bottom:0;">Recent Rooms (Tap to Rejoin)</span>
+        <div id="recentList" class="recent-list"></div>
+      </div>
       <button id="installBtn" class="btn-ghost" type="button" style="display:none;" onclick="triggerInstall()">📲 Install to Home Screen</button>
     </div>
   </section>
@@ -495,6 +526,91 @@
     const urlParams = new URLSearchParams(location.search);
     document.getElementById("joinNick").value = localStorage.getItem("bstk_nick") || "";
     document.getElementById("joinRoom").value = urlParams.get("room") || localStorage.getItem("bstk_room") || "";
+
+    function loadRecentRooms() {
+      try {
+        const raw = localStorage.getItem("bstk_recent_rooms");
+        const arr = raw ? JSON.parse(raw) : [];
+        return Array.isArray(arr) ? arr : [];
+      } catch { return []; }
+    }
+
+    function saveRecentRoom(roomId, nickname, hasPassword) {
+      const list = loadRecentRooms().filter((r) => r.roomId !== roomId);
+      list.unshift({ roomId, nickname, hasPassword: Boolean(hasPassword), lastVisited: Date.now() });
+      try {
+        localStorage.setItem("bstk_recent_rooms", JSON.stringify(list.slice(0, 8)));
+      } catch {}
+      renderRecentRooms();
+    }
+
+    function removeRecentRoom(e, roomId) {
+      e.stopPropagation();
+      const list = loadRecentRooms().filter((r) => r.roomId !== roomId);
+      try { localStorage.setItem("bstk_recent_rooms", JSON.stringify(list)); } catch {}
+      renderRecentRooms();
+    }
+
+    function formatLastSeen(ts) {
+      const diffHrs = Math.floor((Date.now() - ts) / 3600000);
+      if (diffHrs < 1) return "Just now";
+      if (diffHrs < 24) return `${diffHrs}h ago`;
+      const diffDays = Math.floor(diffHrs / 24);
+      if (diffDays === 1) return "Yesterday";
+      if (diffDays < 7) return `${diffDays}d ago`;
+      return new Date(ts).toLocaleDateString();
+    }
+
+    function renderRecentRooms() {
+      const section = document.getElementById("recentSection");
+      const listEl = document.getElementById("recentList");
+      const rooms = loadRecentRooms();
+      if (!rooms.length) {
+        section.style.display = "none";
+        listEl.innerHTML = "";
+        return;
+      }
+      section.style.display = "flex";
+      listEl.innerHTML = "";
+      for (const r of rooms) {
+        let msgCount = 0;
+        try {
+          const rawChain = localStorage.getItem(`bstkchat_chain_${r.roomId}`);
+          msgCount = rawChain ? JSON.parse(rawChain).length : 0;
+        } catch {}
+        const card = document.createElement("div");
+        card.className = "recent-card";
+        card.onclick = () => openRecentRoom(r);
+        card.innerHTML = `
+          <div style="min-width:0;">
+            <div style="display:flex; align-items:center; gap:6px; font-weight:600; font-size:0.9rem;">
+              <span>#${escapeHtml(r.roomId)}</span>
+              <span class="pill" style="font-size:0.68rem;">${r.hasPassword ? "🔒 E2EE" : "🔓 Public"}</span>
+            </div>
+            <div class="recent-meta">${escapeHtml(r.nickname || "User")} • ${msgCount} msg(s) • ${escapeHtml(formatLastSeen(r.lastVisited || Date.now()))}</div>
+          </div>
+          <button class="recent-del" type="button" title="Remove" aria-label="Remove">✕</button>
+        `;
+        card.querySelector(".recent-del").onclick = (e) => removeRecentRoom(e, r.roomId);
+        listEl.appendChild(card);
+      }
+    }
+
+    function openRecentRoom(r) {
+      const nickInput = document.getElementById("joinNick");
+      const roomInput = document.getElementById("joinRoom");
+      const passInput = document.getElementById("joinPass");
+      if (!nickInput.value.trim() && r.nickname) nickInput.value = r.nickname;
+      roomInput.value = r.roomId;
+      if (r.hasPassword && !passInput.value) {
+        passInput.placeholder = `Enter password for #${r.roomId}`;
+        passInput.focus();
+        return;
+      }
+      startChat();
+    }
+
+    renderRecentRooms();
 
     function fillRandomRoom() {
       const adj = ["neon", "cyber", "quantum", "cosmic", "shadow", "hyper", "solar", "golden"];
@@ -640,6 +756,7 @@
         myPass = document.getElementById("joinPass").value || "";
         localStorage.setItem("bstk_nick", myNick);
         localStorage.setItem("bstk_room", myRoom);
+        saveRecentRoom(myRoom, myNick, Boolean(myPass));
 
         aesKey = await deriveRoomKey(myRoom, myPass);
         topics = {
