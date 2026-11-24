@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import queue
 import random
 import re
 import shlex
@@ -10,8 +11,10 @@ import sys
 import threading
 import time
 import uuid
+import webbrowser
+from collections import deque
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import paho.mqtt.client as mqtt
 
@@ -54,7 +57,7 @@ from bstkchat.crypto import (
     sanitize_room_id,
 )
 
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.4.0"
 AUTO_AWAY_SECONDS = 300
 TYPING_TTL_SECONDS = 5.0
 TYPING_THROTTLE_SECONDS = 3.0
@@ -108,6 +111,7 @@ COMMANDS = [
     ("/compact", "Toggle compact single-line messages"),
     ("/multiline", "Toggle multi-line Enter behavior"),
     ("/theme", "Switch toolbar theme: /theme <dark|light|ansi>"),
+    ("/web", "Open the local browser Web UI for this session"),
     ("/clear", "Clear the terminal screen"),
     ("/exit", "Disconnect and exit"),
     ("/quit", "Alias for /exit"),
@@ -275,6 +279,8 @@ class ChatClient:
         self._lock = threading.Lock()
         self._print_lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._web_listeners: List[queue.Queue] = []
+        self._recent_events: deque = deque(maxlen=150)
 
         self.console = Console(force_terminal=True)
         self.client: Optional[mqtt.Client] = None
@@ -286,6 +292,72 @@ class ChatClient:
         self.msg_topic = f"{self.base_topic}/messages"
         self.presence_topic = f"{self.base_topic}/presence"
         self.sync_topic = f"{self.base_topic}/sync"
+
+    def register_web_listener(self) -> queue.Queue:
+        q: queue.Queue = queue.Queue(maxsize=200)
+        with self._lock:
+            self._web_listeners.append(q)
+        return q
+
+    def unregister_web_listener(self, q: queue.Queue) -> None:
+        with self._lock:
+            if q in self._web_listeners:
+                self._web_listeners.remove(q)
+
+    def _emit_event(self, event_type: str, data: Dict[str, Any], record_history: bool = False) -> None:
+        event = {"event": event_type, "data": data}
+        with self._lock:
+            if record_history:
+                self._recent_events.append(event)
+            listeners = list(self._web_listeners)
+        for q in listeners:
+            try:
+                q.put_nowait(event)
+            except queue.Full:
+                pass
+
+    def get_web_state(self) -> Dict[str, Any]:
+        now = time.time()
+        valid, count = self.chain.verify_integrity()
+        with self._lock:
+            peers_list = [
+                {"name": name, "status": str(info["status"]), "color": get_user_color(name)}
+                for name, info in sorted(self.peers.items(), key=lambda x: x[0].lower())
+            ]
+            typers = [
+                name
+                for name, ts in self.typing_peers.items()
+                if now - ts <= TYPING_TTL_SECONDS
+            ]
+            pending = [
+                {
+                    "id": fid,
+                    "sender": str(info["sender"]),
+                    "filename": str(info["filename"]),
+                    "size": int(info["size"]),
+                }
+                for fid, info in self.pending_files.items()
+            ]
+            recent = list(self._recent_events)
+            return {
+                "version": APP_VERSION,
+                "nickname": self.nickname,
+                "status": self.status,
+                "room_id": self.room_id,
+                "e2ee": bool(self.password),
+                "use_tls": self.use_tls,
+                "connected": self.connected,
+                "peers": peers_list,
+                "typing": typers,
+                "chain": {
+                    "enabled": self.chain.enabled,
+                    "valid": valid,
+                    "count": count,
+                    "filepath": self.chain.filepath,
+                },
+                "pending_files": pending,
+                "recent_events": recent,
+            }
 
     def record_activity(self) -> None:
         """Records local user activity and restores Active status if Auto-Away."""
@@ -416,11 +488,13 @@ class ChatClient:
         self.client.subscribe(sync_topic)
         self.send_presence("join")
         self.request_sync()
+        self._emit_event("state_update", self.get_web_state())
 
     def on_disconnect(self, client, userdata, rc, *args, **kwargs) -> None:
         """Handles disconnection events gracefully."""
         with self._lock:
             self.connected = False
+        self._emit_event("state_update", self.get_web_state())
         if self.running:
             self.print_system("Connection lost. Reconnecting...")
 
@@ -471,6 +545,8 @@ class ChatClient:
                     log_text=f"{sender} joined the room.",
                 )
                 self.send_presence("heartbeat")
+                self._emit_event("system", {"text": f"{sender} joined the room.", "time": datetime.now().strftime("%H:%M:%S")}, record_history=True)
+            self._emit_event("state_update", self.get_web_state())
 
         elif msg_type == "leave":
             removed = False
@@ -484,15 +560,19 @@ class ChatClient:
                     f"❌ [bold {color}]{safe_sender}[/] left the room.",
                     log_text=f"{sender} left the room.",
                 )
+                self._emit_event("system", {"text": f"{sender} left the room.", "time": datetime.now().strftime("%H:%M:%S")}, record_history=True)
+            self._emit_event("state_update", self.get_web_state())
 
         elif msg_type == "heartbeat":
             with self._lock:
                 self.peers[sender] = {"last_seen": now, "status": peer_status}
+            self._emit_event("state_update", self.get_web_state())
 
         elif msg_type == "typing":
             with self._lock:
                 self.peers[sender] = {"last_seen": now, "status": peer_status}
                 self.typing_peers[sender] = now
+            self._emit_event("state_update", self.get_web_state())
 
         elif msg_type == "rename":
             old_name = str(payload.get("old", sender))
@@ -506,6 +586,8 @@ class ChatClient:
                 f"changed nickname to [bold {get_user_color(new_name)}]{escape_markup(new_name)}[/]",
                 log_text=f"{old_name} changed nickname to {new_name}",
             )
+            self._emit_event("system", {"text": f"{old_name} changed nickname to {new_name}", "time": datetime.now().strftime("%H:%M:%S")}, record_history=True)
+            self._emit_event("state_update", self.get_web_state())
 
     def _render_incoming_text(
         self, timestamp: str, sender: str, text: str, is_mention: bool = False, is_dm: bool = False
@@ -581,6 +663,19 @@ class ChatClient:
             if target == self.nickname:
                 self._render_incoming_text(timestamp, sender, decrypted_text, is_dm=True)
                 self.write_to_log(f"DM from {sender}: {decrypted_text}")
+                self._emit_event(
+                    "message",
+                    {
+                        "sender": sender,
+                        "color": color,
+                        "text": decrypted_text,
+                        "time": timestamp,
+                        "dm": True,
+                        "target": target,
+                        "own": False,
+                    },
+                    record_history=True,
+                )
                 self._ring_bell()
             return
 
@@ -592,6 +687,19 @@ class ChatClient:
         else:
             self.write_to_log(f"<{sender}>: {decrypted_text}")
 
+        self._emit_event(
+            "message",
+            {
+                "sender": sender,
+                "color": color,
+                "text": decrypted_text,
+                "time": timestamp,
+                "mention": mentioned,
+                "own": False,
+            },
+            record_history=True,
+        )
+
         if msg_type == "message":
             msg_id = str(
                 payload.get("id")
@@ -599,6 +707,7 @@ class ChatClient:
             )
             ts = float(payload.get("ts") or time.time())
             self.chain.append_message(msg_id, ts, timestamp, sender, "message", encrypted_text)
+            self._emit_event("state_update", self.get_web_state())
 
     def request_sync(self, limit: int = 100) -> None:
         """Broadcasts a decentralized history sync request to online room peers."""
@@ -663,11 +772,26 @@ class ChatClient:
             for block in added:
                 ok, text = decrypt_message(str(block.get("ciphertext", "")), key, aad=aad)
                 if ok:
+                    b_sender = str(block.get("sender", "Peer"))
+                    b_time = str(block.get("time", "--:--:--"))
                     self._render_incoming_text(
-                        escape_markup(str(block.get("time", "--:--:--"))),
-                        str(block.get("sender", "Peer")),
+                        escape_markup(b_time),
+                        b_sender,
                         text,
                     )
+                    self._emit_event(
+                        "message",
+                        {
+                            "sender": b_sender,
+                            "color": get_user_color(b_sender),
+                            "text": text,
+                            "time": b_time,
+                            "synced": True,
+                            "own": b_sender == self.nickname,
+                        },
+                        record_history=True,
+                    )
+            self._emit_event("state_update", self.get_web_state())
 
     def replay_recent_chain(self, limit: int = 10) -> None:
         """Displays recent decrypted blocks from the local room chain on join."""
@@ -733,6 +857,18 @@ class ChatClient:
             f"Type [bold cyan]/accept {file_id}[/] to save.",
             log_text=f"{sender} sent file {filename} ({len(raw_bytes)} bytes)",
         )
+        self._emit_event(
+            "file_offer",
+            {
+                "id": file_id,
+                "sender": sender,
+                "filename": filename,
+                "size": len(raw_bytes),
+                "time": datetime.now().strftime("%H:%M:%S"),
+            },
+            record_history=True,
+        )
+        self._emit_event("state_update", self.get_web_state())
         self._ring_bell()
 
     def accept_file(self, file_id: Optional[str] = None, target_dir: str = "") -> Optional[str]:
@@ -758,6 +894,37 @@ class ChatClient:
         )
         return saved_path
 
+    def send_file_bytes(self, filename: str, raw_bytes: bytes) -> bool:
+        """Checksums, encrypts, and broadcasts raw file bytes up to MAX_FILE_BYTES."""
+        if len(raw_bytes) > MAX_FILE_BYTES:
+            self.print_system(
+                f"File too large ({len(raw_bytes) // 1024} KB). Max allowed is {MAX_FILE_BYTES // 1024} KB."
+            )
+            return False
+
+        clean_name = os.path.basename(filename.strip()) or "file.bin"
+        payload_json = json.dumps({
+            "filename": clean_name,
+            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "data": base64.b64encode(raw_bytes).decode("ascii"),
+        })
+        if self._publish_encrypted("file", payload_json):
+            self.print_system(
+                f"📤 Sent encrypted file [bold white]{escape_markup(clean_name)}[/] "
+                f"({len(raw_bytes) / 1024:.1f} KB).",
+                log_text=f"Sent file {clean_name}",
+            )
+            self._emit_event(
+                "system",
+                {
+                    "text": f"You sent encrypted file {clean_name} ({len(raw_bytes) / 1024:.1f} KB).",
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                },
+                record_history=True,
+            )
+            return True
+        return False
+
     def send_file(self, filepath: str) -> bool:
         """Reads, checksums, encrypts, and broadcasts a file up to MAX_FILE_BYTES."""
         expanded = os.path.expanduser(filepath)
@@ -779,19 +946,7 @@ class ChatClient:
             self.print_system(f"Could not read file: {escape_markup(str(exc))}")
             return False
 
-        payload_json = json.dumps({
-            "filename": os.path.basename(expanded),
-            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
-            "data": base64.b64encode(raw_bytes).decode("ascii"),
-        })
-        if self._publish_encrypted("file", payload_json):
-            self.print_system(
-                f"📤 Sent encrypted file [bold white]{escape_markup(os.path.basename(expanded))}[/] "
-                f"({len(raw_bytes) / 1024:.1f} KB).",
-                log_text=f"Sent file {os.path.basename(expanded)}",
-            )
-            return True
-        return False
+        return self.send_file_bytes(os.path.basename(expanded), raw_bytes)
 
     def send_presence(self, status_type: str, extra_data: Optional[dict] = None) -> None:
         """Broadcasts a presence payload."""
@@ -863,6 +1018,18 @@ class ChatClient:
                     Markdown(text),
                 )
             self.write_to_log(f"<You>: {text}")
+            self._emit_event(
+                "message",
+                {
+                    "sender": self.nickname,
+                    "color": get_user_color(self.nickname),
+                    "text": text,
+                    "time": timestamp,
+                    "own": True,
+                },
+                record_history=True,
+            )
+            self._emit_event("state_update", self.get_web_state())
 
     def send_private_message(self, target: str, text: str) -> None:
         """Sends an encrypted Direct Message to a specific user in the room."""
@@ -879,6 +1046,19 @@ class ChatClient:
                     Markdown(text),
                 )
             self.write_to_log(f"DM to {target}: {text}")
+            self._emit_event(
+                "message",
+                {
+                    "sender": self.nickname,
+                    "color": get_user_color(self.nickname),
+                    "text": text,
+                    "time": timestamp,
+                    "dm": True,
+                    "target": target,
+                    "own": True,
+                },
+                record_history=True,
+            )
 
     def switch_room(self, new_room_id: str, new_password: str = "") -> None:
         """Gracefully disconnects from the current room and enters a new one."""
@@ -925,6 +1105,7 @@ class ChatClient:
         self.print_room_banner()
         self.replay_recent_chain(10)
         self.request_sync()
+        self._emit_event("state_update", self.get_web_state())
 
     def print_room_banner(self) -> None:
         """Displays a clean metadata panel for the current active room."""
@@ -1105,6 +1286,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--compact", action="store_true", help="Use compact single-line messages")
     parser.add_argument("--no-log", action="store_true", help="Disable local session logging")
     parser.add_argument("--no-store", action="store_true", help="Disable decentralized room chain storage")
+    parser.add_argument("--web", action="store_true", help="Launch the local browser Web UI")
+    parser.add_argument("--web-port", type=int, default=0, help="Port for local Web UI (default: auto)")
     parser.add_argument("--version", action="version", version=f"bstkchat {APP_VERSION}")
     return parser
 
@@ -1245,6 +1428,36 @@ def main(argv: Optional[List[str]] = None) -> None:
     )
     chat.setup_mqtt()
     chat.start_background_tasks()
+
+    web_server = None
+    if args.web:
+        from bstkchat.web import WebServer
+
+        web_server = WebServer(chat, port=args.web_port)
+        url = web_server.start()
+        chat.safe_print(
+            Panel(
+                f"[bold green]🌐 Web UI running at:[/]\n[bold cyan]{escape_markup(url)}[/]\n\n"
+                "[dim white]Press Ctrl+C to stop the server and exit.[/]",
+                title=f"[bold cyan]BSTK Chat Web UI v{APP_VERSION}[/]",
+                box=box.ROUNDED,
+                border_style="cyan",
+                expand=False,
+            )
+        )
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        try:
+            while chat.running:
+                chat._stop_event.wait(1)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            web_server.stop()
+            chat.close()
+        return
 
     chat.clear_screen()
     chat.print_room_banner()
@@ -1462,6 +1675,20 @@ def main(argv: Optional[List[str]] = None) -> None:
                             save_config(cfg)
                             chat.print_system(f"Toolbar theme set to [bold]{chat.theme}[/].")
 
+                    elif cmd == "/web":
+                        if web_server is None:
+                            from bstkchat.web import WebServer
+
+                            web_server = WebServer(chat, port=args.web_port)
+                            url = web_server.start()
+                        else:
+                            url = web_server.url
+                        chat.print_system(f"🌐 Web UI running at [bold cyan]{escape_markup(url)}[/]")
+                        try:
+                            webbrowser.open(url)
+                        except Exception:
+                            pass
+
                     elif cmd == "/clear":
                         chat.clear_screen()
                         chat.print_room_banner()
@@ -1493,6 +1720,8 @@ def main(argv: Optional[List[str]] = None) -> None:
             except EOFError:
                 break
 
+    if web_server is not None:
+        web_server.stop()
     chat.close()
 
 

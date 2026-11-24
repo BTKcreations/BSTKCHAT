@@ -6,7 +6,8 @@
 
 ## Features
 
-- **Zero Configuration + CLI Flags:** Connects automatically over MQTT (`broker.hivemq.com`) with TLS (`8883`) enabled by default, or use `--nick`, `--room`, `--password`, `--broker`, `--port`, and `--no-tls`.
+- **Browser Web UI (`--web` / `/web`):** Launch a local, token-authenticated browser interface (`bstkchat --web`) with Dark/Light themes, live peer sidebar, file drag-and-drop, and SSE real-time updates—while keeping all E2EE and decentralized chain storage locally on your machine.
+- **Zero Configuration + CLI Flags:** Connects automatically over MQTT (`broker.hivemq.com`) with TLS (`8883`) enabled by default, or use `--nick`, `--room`, `--password`, `--broker`, `--port`, `--no-tls`, `--web`, and `--web-port`.
 - **End-to-End Encryption (E2EE):** Protect rooms with a password using `scrypt` key derivation, per-message random 96-bit nonces, **AES-256-GCM** authenticated encryption, and topic-bound AAD.
 - **Encrypted File Sharing:** Send files up to 512 KB with `/send <filepath>`, verified with SHA-256 and saved safely via `/accept [id]`.
 - **Modern Terminal UI/UX:**
@@ -116,6 +117,7 @@ Alice > /log off
 | `/compact` | Toggles compact single-line message rendering |
 | `/multiline` | Toggles multi-line input (`Enter` = newline, `Alt+Enter` = send) |
 | `/theme <dark\|light\|ansi>` | Switches the bottom status bar theme |
+| `/web` | Opens the local browser Web UI for the active session |
 | `/clear` | Clears the terminal screen and redraws the room banner |
 | `/exit` or `/quit` | Announces departure and exits cleanly |
 

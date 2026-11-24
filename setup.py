@@ -2,8 +2,9 @@ from setuptools import setup, find_packages
 
 setup(
     name="bstkchat",
-    version="2.3.0",
+    version="2.4.0",
     packages=find_packages(),
+    package_data={"bstkchat": ["*.html"]},
     install_requires=[
         "paho-mqtt>=1.6.1",
         "rich>=13.0.0",

@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BSTK Chat — Decentralized E2EE Terminal &amp; Web Chat</title>
+  <style>
+    :root {
+      --bg: #0b1120;
+      --surface: #111827;
+      --surface-2: #1e293b;
+      --border: #263246;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-2: #818cf8;
+      --green: #22c55e;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --own-bg: #172554;
+      --dm-bg: #3b0764;
+      --mention-bg: rgba(245, 158, 11, 0.14);
+      --code-bg: #020617;
+    }
+    html[data-theme="light"] {
+      --bg: #f1f5f9;
+      --surface: #ffffff;
+      --surface-2: #f8fafc;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --muted: #64748b;
+      --accent: #0284c7;
+      --accent-2: #4f46e5;
+      --green: #16a34a;
+      --amber: #d97706;
+      --red: #dc2626;
+      --own-bg: #e0f2fe;
+      --dm-bg: #f3e8ff;
+      --mention-bg: rgba(245, 158, 11, 0.15);
+      --code-bg: #f1f5f9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: grid;
+      grid-template-columns: 290px 1fr;
+      overflow: hidden;
+    }
+    .sidebar {
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+      gap: 14px;
+      overflow-y: auto;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-weight: 700;
+      font-size: 1.05rem;
+      letter-spacing: 0.02em;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.75rem;
+      padding: 3px 9px;
+      border-radius: 999px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); }
+    .dot.ok { background: var(--green); }
+    .card {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .card-title {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    input, select, textarea, button {
+      font: inherit;
+      color: inherit;
+    }
+    .input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 7px 10px;
+      font-size: 0.85rem;
+      outline: none;
+    }
+    .input:focus { border-color: var(--accent); }
+    .btn {
+      background: var(--accent);
+      color: #082f49;
+      font-weight: 600;
+      border: none;
+      border-radius: 8px;
+      padding: 7px 12px;
+      cursor: pointer;
+      font-size: 0.84rem;
+    }
+    .btn:hover { opacity: 0.92; }
+    .btn-ghost {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 0.8rem;
+    }
+    .btn-ghost:hover { border-color: var(--accent); }
+    .peer-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 220px;
+      overflow-y: auto;
+    }
+    .peer-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 8px;
+      border-radius: 8px;
+      background: var(--bg);
+      border: 1px solid transparent;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    .peer-item:hover { border-color: var(--accent); }
+    .peer-status { font-size: 0.72rem; color: var(--muted); }
+    .main {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+    .topbar {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .topbar-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .room-name { font-weight: 700; font-size: 1.05rem; }
+    .topbar-right { display: flex; align-items: center; gap: 8px; }
+    .search-box { width: 210px; }
+    .search-results {
+      background: var(--surface-2);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 20px;
+      font-size: 0.8rem;
+      max-height: 160px;
+      overflow-y: auto;
+      display: none;
+    }
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 18px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .msg {
+      max-width: 78%;
+      padding: 10px 14px;
+      border-radius: 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      align-self: flex-start;
+      line-height: 1.45;
+      word-wrap: break-word;
+    }
+    .msg.own { background: var(--own-bg); align-self: flex-end; }
+    .msg.dm { background: var(--dm-bg); border-color: var(--accent-2); }
+    .msg.mention { background: var(--mention-bg); border-color: var(--amber); }
+    .msg.system {
+      align-self: center;
+      max-width: 90%;
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      font-size: 0.8rem;
+      padding: 3px 8px;
+    }
+    .msg-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.78rem;
+      margin-bottom: 4px;
+    }
+    .msg-sender { font-weight: 700; }
+    .msg-time { color: var(--muted); font-size: 0.72rem; }
+    .msg-body pre {
+      background: var(--code-bg);
+      padding: 9px 11px;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 0.82rem;
+      margin: 6px 0 2px;
+    }
+    .msg-body code {
+      background: var(--code-bg);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 0.84em;
+    }
+    .typing-bar {
+      padding: 4px 22px;
+      font-size: 0.78rem;
+      color: var(--accent);
+      min-height: 22px;
+    }
+    .composer {
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      padding: 12px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .composer-row { display: flex; align-items: flex-end; gap: 10px; }
+    .composer textarea {
+      flex: 1;
+      resize: none;
+      min-height: 40px;
+      max-height: 140px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 9px 12px;
+      font-size: 0.9rem;
+      outline: none;
+    }
+    .composer textarea:focus { border-color: var(--accent); }
+    @media (max-width: 820px) {
+      body { grid-template-columns: 1fr; }
+      .sidebar { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <span>⚡ BSTK Chat</span>
+      <span class="pill"><span id="connDot" class="dot"></span><span id="connText">Connecting</span></span>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Your Identity</div>
+      <div style="display:flex; gap:6px;">
+        <input id="nickInput" class="input" placeholder="Nickname" />
+        <button class="btn-ghost" onclick="updateNick()">Save</button>
+      </div>
+      <div style="display:flex; gap:6px;">
+        <input id="statusInput" class="input" placeholder="Status (e.g. Coding)" />
+        <button class="btn-ghost" onclick="updateStatus()">Set</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Switch / Join Room</div>
+      <input id="roomInput" class="input" placeholder="Room ID" />
+      <input id="roomPassInput" class="input" type="password" placeholder="Optional E2EE Password" />
+      <button class="btn" onclick="switchRoom()">Join Room</button>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Online Peers (<span id="peerCount">1</span>)</div>
+      <div id="peerList" class="peer-list"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Decentralized Room Chain</div>
+      <div id="chainInfo" style="font-size:0.8rem; color:var(--muted);">Loading...</div>
+      <button class="btn-ghost" onclick="syncPeers()">🔗 Sync Missing Blocks</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="room-name" id="roomTitle">#room</span>
+        <span id="e2eeBadge" class="pill">🔓 Public</span>
+        <span id="tlsBadge" class="pill">TLS</span>
+        <button class="btn-ghost" onclick="copyInvite()">📋 Copy Invite</button>
+      </div>
+      <div class="topbar-right">
+        <input id="searchInput" class="input search-box" placeholder="Search room log..." onkeydown="if(event.key==='Enter') searchLog()" />
+        <button class="btn-ghost" onclick="toggleTheme()" title="Toggle theme">🌓</button>
+      </div>
+    </header>
+
+    <div id="searchResults" class="search-results"></div>
+    <div id="messages" class="messages"></div>
+    <div id="typingBar" class="typing-bar"></div>
+
+    <footer class="composer">
+      <div style="display:flex; align-items:center; gap:8px; font-size:0.78rem; color:var(--muted);">
+        <span>Send to:</span>
+        <select id="dmTarget" class="input" style="width:auto; padding:3px 8px;">
+          <option value="">Everyone in room</option>
+        </select>
+        <label class="btn-ghost" style="cursor:pointer;">
+          📎 Send File (≤512KB)
+          <input id="fileInput" type="file" style="display:none;" onchange="uploadFile(this)" />
+        </label>
+      </div>
+      <div class="composer-row">
+        <textarea id="msgInput" placeholder="Write a message (Markdown supported)... Enter to send, Shift+Enter for newline"></textarea>
+        <button class="btn" onclick="sendMessage()">Send</button>
+      </div>
+    </footer>
+  </main>
+
+  <script>
+    const TOKEN = new URLSearchParams(location.search).get("token") || "";
+    const msgEl = document.getElementById("messages");
+    const msgInput = document.getElementById("msgInput");
+    let currentState = null;
+    let lastTypingSent = 0;
+
+    const savedTheme = localStorage.getItem("bstk_theme") || "dark";
+    document.documentElement.setAttribute("data-theme", savedTheme);
+
+    function toggleTheme() {
+      const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      localStorage.setItem("bstk_theme", next);
+    }
+
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function formatMarkdown(raw) {
+      let safe = escapeHtml(raw);
+      safe = safe.replace(/```([\s\S]*?)```/g, (_, code) => `<pre><code>${code.trim()}</code></pre>`);
+      safe = safe.replace(/`([^`]+)`/g, "<code>$1</code>");
+      safe = safe.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      safe = safe.replace(/\n/g, "<br>");
+      return safe;
+    }
+
+    async function api(path, body = null) {
+      const opts = {
+        method: body ? "POST" : "GET",
+        headers: { "X-BSTK-Token": TOKEN, "Content-Type": "application/json" },
+      };
+      if (body) opts.body = JSON.stringify(body);
+      const res = await fetch(path, opts);
+      return res.json();
+    }
+
+    function appendMessage(data) {
+      const div = document.createElement("div");
+      const classes = ["msg"];
+      if (data.own) classes.push("own");
+      if (data.dm) classes.push("dm");
+      if (data.mention) classes.push("mention");
+      div.className = classes.join(" ");
+
+      const badge = data.dm
+        ? `<span class="pill">🔒 DM ${data.own ? "to " + escapeHtml(data.target) : "from " + escapeHtml(data.sender)}</span>`
+        : data.synced ? `<span class="pill">🔗 Synced</span>` : "";
+
+      div.innerHTML = `
+        <div class="msg-head">
+          <span class="msg-sender">${escapeHtml(data.own ? data.sender + " (You)" : data.sender)}</span>
+          ${badge}
+          <span class="msg-time">${escapeHtml(data.time || "")}</span>
+        </div>
+        <div class="msg-body">${formatMarkdown(data.text || "")}</div>
+      `;
+      msgEl.appendChild(div);
+      msgEl.scrollTop = msgEl.scrollHeight;
+    }
+
+    function appendSystem(text, time = "") {
+      const div = document.createElement("div");
+      div.className = "msg system";
+      div.textContent = (time ? `[${time}] ` : "") + text;
+      msgEl.appendChild(div);
+      msgEl.scrollTop = msgEl.scrollHeight;
+    }
+
+    function appendFileOffer(data) {
+      const div = document.createElement("div");
+      div.className = "msg";
+      const kb = (Number(data.size || 0) / 1024).toFixed(1);
+      div.innerHTML = `
+        <div class="msg-head">
+          <span class="msg-sender">📎 ${escapeHtml(data.sender)}</span>
+          <span class="msg-time">${escapeHtml(data.time || "")}</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+          <span><strong>${escapeHtml(data.filename)}</strong> (${kb} KB)</span>
+          <button class="btn" onclick="acceptFile('${escapeHtml(data.id)}', this)">Accept &amp; Save</button>
+        </div>
+      `;
+      msgEl.appendChild(div);
+      msgEl.scrollTop = msgEl.scrollHeight;
+    }
+
+    function renderState(state) {
+      const isInitial = currentState === null;
+      currentState = state;
+
+      document.getElementById("connDot").className = "dot" + (state.connected ? " ok" : "");
+      document.getElementById("connText").textContent = state.connected ? "Connected" : "Reconnecting";
+      document.getElementById("roomTitle").textContent = "#" + state.room_id;
+      document.getElementById("e2eeBadge").textContent = state.e2ee ? "🔒 AES-256-GCM E2EE" : "🔓 Public Room";
+      document.getElementById("tlsBadge").textContent = state.use_tls ? "🛡️ TLS" : "TCP";
+      document.getElementById("nickInput").value = state.nickname;
+      document.getElementById("statusInput").value = state.status;
+      document.getElementById("peerCount").textContent = String((state.peers || []).length + 1);
+
+      const peerList = document.getElementById("peerList");
+      const dmSelect = document.getElementById("dmTarget");
+      const prevTarget = dmSelect.value;
+      peerList.innerHTML = `<div class="peer-item"><span><strong>${escapeHtml(state.nickname)}</strong> (You)</span><span class="peer-status">${escapeHtml(state.status)}</span></div>`;
+      dmSelect.innerHTML = `<option value="">Everyone in room</option>`;
+
+      (state.peers || []).forEach((p) => {
+        const item = document.createElement("div");
+        item.className = "peer-item";
+        item.title = "Click to DM";
+        item.onclick = () => { dmSelect.value = p.name; msgInput.focus(); };
+        item.innerHTML = `<span>${escapeHtml(p.name)}</span><span class="peer-status">${escapeHtml(p.status)}</span>`;
+        peerList.appendChild(item);
+
+        const opt = document.createElement("option");
+        opt.value = p.name;
+        opt.textContent = "DM → " + p.name;
+        dmSelect.appendChild(opt);
+      });
+      dmSelect.value = prevTarget;
+
+      const c = state.chain || {};
+      document.getElementById("chainInfo").textContent = c.enabled
+        ? `${c.valid ? "✓ Valid" : "✗ Tampered"} · ${c.count} encrypted block(s)`
+        : "Chain storage disabled (--no-store)";
+
+      const typers = state.typing || [];
+      document.getElementById("typingBar").textContent = typers.length
+        ? `✎ ${typers.join(", ")} ${typers.length > 1 ? "are" : "is"} typing...`
+        : "";
+
+      if (isInitial && Array.isArray(state.recent_events)) {
+        state.recent_events.forEach((evt) => {
+          if (evt.event === "message") appendMessage(evt.data);
+          else if (evt.event === "system") appendSystem(evt.data.text, evt.data.time);
+          else if (evt.event === "file_offer") appendFileOffer(evt.data);
+        });
+      }
+    }
+
+    async function sendMessage() {
+      const text = msgInput.value.trim();
+      if (!text) return;
+      const target = document.getElementById("dmTarget").value;
+      msgInput.value = "";
+      await api("/api/send", { text, target });
+    }
+
+    async function switchRoom() {
+      const room_id = document.getElementById("roomInput").value.trim();
+      const password = document.getElementById("roomPassInput").value;
+      if (!room_id) return;
+      msgEl.innerHTML = "";
+      await api("/api/room", { room_id, password });
+      document.getElementById("roomPassInput").value = "";
+    }
+
+    async function updateNick() {
+      const nickname = document.getElementById("nickInput").value.trim();
+      if (nickname) await api("/api/nick", { nickname });
+    }
+
+    async function updateStatus() {
+      const status = document.getElementById("statusInput").value.trim();
+      await api("/api/status", { status });
+    }
+
+    async function syncPeers() {
+      await api("/api/sync", { limit: 100 });
+      appendSystem("Requested missing blocks from online peers...");
+    }
+
+    async function acceptFile(fileId, btn) {
+      btn.disabled = true;
+      btn.textContent = "Saving...";
+      const res = await api("/api/file/accept", { file_id: fileId });
+      if (res.ok) {
+        btn.textContent = "✓ Saved";
+        appendSystem("Saved file to " + res.path);
+      } else {
+        btn.textContent = "Failed";
+      }
+    }
+
+    function uploadFile(input) {
+      const file = input.files[0];
+      if (!file) return;
+      if (file.size > 512 * 1024) {
+        alert("File exceeds 512 KB limit.");
+        input.value = "";
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const b64 = reader.result.split(",")[1];
+        await api("/api/file/send", { filename: file.name, data_b64: b64 });
+        input.value = "";
+      };
+      reader.readAsDataURL(file);
+    }
+
+    async function searchLog() {
+      const q = document.getElementById("searchInput").value.trim();
+      const box = document.getElementById("searchResults");
+      if (!q) { box.style.display = "none"; return; }
+      const res = await api("/api/search?q=" + encodeURIComponent(q));
+      box.style.display = "block";
+      box.innerHTML = res.matches && res.matches.length
+        ? `<strong>Matches (${res.matches.length}):</strong><br>` + res.matches.map(escapeHtml).join("<br>")
+        : `No matches for "${escapeHtml(q)}".`;
+    }
+
+    function copyInvite() {
+      if (!currentState) return;
+      const cmd = `bstkchat --room ${currentState.room_id}${currentState.use_tls ? "" : " --no-tls"}`;
+      navigator.clipboard?.writeText(cmd);
+      appendSystem("Copied invite command: " + cmd);
+    }
+
+    msgInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      } else if (Date.now() - lastTypingSent > 3000) {
+        lastTypingSent = Date.now();
+        api("/api/typing", {});
+      }
+    });
+
+    const es = new EventSource("/events?token=" + encodeURIComponent(TOKEN));
+    es.addEventListener("state_update", (e) => renderState(JSON.parse(e.data)));
+    es.addEventListener("message", (e) => appendMessage(JSON.parse(e.data)));
+    es.addEventListener("system", (e) => {
+      const d = JSON.parse(e.data);
+      appendSystem(d.text, d.time);
+    });
+    es.addEventListener("file_offer", (e) => appendFileOffer(JSON.parse(e.data)));
+  </script>
+</body>
+</html>
