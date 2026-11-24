@@ -1,3 +1,6 @@
+import argparse
+import base64
+import hashlib
 import json
 import os
 import random
@@ -6,6 +9,7 @@ import shlex
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -25,10 +29,24 @@ from prompt_toolkit import PromptSession, print_formatted_text
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import ANSI, HTML
 from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import clear as pt_clear
-from prompt_toolkit.styles import Style as PromptStyle
+from prompt_toolkit.styles import DynamicStyle, Style as PromptStyle
 
+from bstkchat.chain import RoomChain
+from bstkchat.config import (
+    DEFAULT_BROKER,
+    DEFAULT_PLAIN_PORT,
+    DEFAULT_TLS_PORT,
+    MAX_FILE_BYTES,
+    VALID_THEMES,
+    load_config,
+    save_config,
+    save_received_file,
+    search_log,
+    tail_log,
+)
 from bstkchat.crypto import (
     decrypt_message,
     derive_room_key,
@@ -36,7 +54,11 @@ from bstkchat.crypto import (
     sanitize_room_id,
 )
 
-# Global color pool for deterministic username coloring
+APP_VERSION = "2.3.0"
+AUTO_AWAY_SECONDS = 300
+TYPING_TTL_SECONDS = 5.0
+TYPING_THROTTLE_SECONDS = 3.0
+
 USER_COLORS = [
     "cyan",
     "magenta",
@@ -51,15 +73,41 @@ USER_COLORS = [
     "bright_cyan",
 ]
 
+THEME_STYLES = {
+    "dark": {
+        "prompt": "bold fg:ansicyan",
+        "bottom-toolbar": "bg:#1e293b fg:#e2e8f0",
+    },
+    "light": {
+        "prompt": "bold fg:ansiblue",
+        "bottom-toolbar": "bg:#e2e8f0 fg:#0f172a",
+    },
+    "ansi": {
+        "prompt": "bold fg:ansicyan",
+        "bottom-toolbar": "reverse",
+    },
+}
+
 COMMANDS = [
     ("/help", "Show available commands"),
-    ("/room", "Switch room: /room <id> [password]"),
+    ("/room", "Switch room: /room <id> [password|--lock]"),
     ("/nick", "Change nickname: /nick <name>"),
     ("/msg", "Send private DM: /msg <user> <message>"),
+    ("/send", "Send encrypted file: /send <filepath>"),
+    ("/accept", "Accept pending file: /accept [id]"),
     ("/status", "Set status: /status <text>"),
     ("/who", "List online users in the room"),
     ("/users", "Alias for /who"),
-    ("/log", "Toggle or inspect logging: /log [on|off]"),
+    ("/invite", "Show shareable room join command"),
+    ("/history", "Show recent local log lines: /history [N]"),
+    ("/search", "Search local room log: /search <query>"),
+    ("/chain", "Show decentralized room chain status & integrity"),
+    ("/sync", "Sync missing room history from peers: /sync [N]"),
+    ("/log", "Logging mode: /log [on|off|ephemeral]"),
+    ("/mute", "Toggle audio bell alerts"),
+    ("/compact", "Toggle compact single-line messages"),
+    ("/multiline", "Toggle multi-line Enter behavior"),
+    ("/theme", "Switch toolbar theme: /theme <dark|light|ansi>"),
     ("/clear", "Clear the terminal screen"),
     ("/exit", "Disconnect and exit"),
     ("/quit", "Alias for /exit"),
@@ -114,7 +162,7 @@ def is_user_mentioned(text: str, nickname: str) -> bool:
 
 
 class ChatCompleter(Completer):
-    """Context-aware autocomplete for slash commands, log options, and @mentions."""
+    """Context-aware autocomplete for slash commands, options, and @mentions."""
 
     def __init__(self, chat_client: "ChatClient"):
         self.chat = chat_client
@@ -122,7 +170,6 @@ class ChatCompleter(Completer):
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
 
-        # Slash command completion at start of line
         if text.startswith("/"):
             parts = text.split(" ")
             if len(parts) == 1:
@@ -150,12 +197,25 @@ class ChatCompleter(Completer):
 
             if cmd == "/log" and len(parts) == 2:
                 prefix = parts[1].lower()
-                for opt in ("on", "off"):
+                for opt in ("on", "off", "ephemeral"):
                     if opt.startswith(prefix):
                         yield Completion(opt, start_position=-len(parts[1]))
                 return
 
-        # @mention completion anywhere in regular messages
+            if cmd == "/theme" and len(parts) == 2:
+                prefix = parts[1].lower()
+                for opt in VALID_THEMES:
+                    if opt.startswith(prefix):
+                        yield Completion(opt, start_position=-len(parts[1]))
+                return
+
+            if cmd == "/accept" and len(parts) == 2:
+                prefix = parts[1].lower()
+                for fid in self.chat.get_pending_file_ids():
+                    if fid.lower().startswith(prefix):
+                        yield Completion(fid, start_position=-len(parts[1]))
+                return
+
         word = document.get_word_before_cursor(WORD=True)
         if word.startswith("@"):
             prefix = word[1:].lower()
@@ -169,54 +229,97 @@ class ChatCompleter(Completer):
 
 
 class ChatClient:
-    def __init__(self, nickname: str, room_id: str, password: str = ""):
+    def __init__(
+        self,
+        nickname: str,
+        room_id: str,
+        password: str = "",
+        broker: str = DEFAULT_BROKER,
+        port: int = DEFAULT_TLS_PORT,
+        use_tls: bool = True,
+        theme: str = "dark",
+        compact: bool = False,
+        logging_enabled: bool = True,
+        store_chain: bool = True,
+    ):
         self.nickname = nickname
         self.room_id = sanitize_room_id(room_id)
         self.password = password
         self.status = "Active"
+        self.broker = broker
+        self.port = port
+        self.use_tls = use_tls
+        self.theme = theme if theme in VALID_THEMES else "dark"
+        self.compact_mode = compact
+        self.multiline_mode = False
+        self.muted = False
+        self.ephemeral_log = False
 
         # Derive authenticated encryption key for the room
         self.secret_key = derive_room_key(self.room_id, self.password)
 
         # peer -> {"last_seen": timestamp, "status": status_text}
         self.peers: Dict[str, Dict[str, object]] = {}
+        self.typing_peers: Dict[str, float] = {}
+        self.pending_files: Dict[str, Dict[str, object]] = {}
+        self._file_seq = 0
+
         self.running = True
         self.connected = False
-        self.logging_enabled = True
+        self.logging_enabled = logging_enabled
         self._log_error_warned = False
+        self._last_activity = time.time()
+        self._last_typing_sent = 0.0
+        self._auto_away_active = False
 
         self._lock = threading.Lock()
         self._print_lock = threading.Lock()
         self._stop_event = threading.Event()
 
-        # Force terminal capability so Rich generates ANSI codes inside captures
         self.console = Console(force_terminal=True)
         self.client: Optional[mqtt.Client] = None
-
-        # Public broker
-        self.broker = "broker.hivemq.com"
-        self.port = 1883
-
-        # Isolated topic namespace
+        self.chain = RoomChain(self.room_id, enabled=store_chain)
         self._update_topics(self.room_id)
 
     def _update_topics(self, room_id: str) -> None:
         self.base_topic = f"bstkchat/rooms/{room_id}"
         self.msg_topic = f"{self.base_topic}/messages"
         self.presence_topic = f"{self.base_topic}/presence"
+        self.sync_topic = f"{self.base_topic}/sync"
+
+    def record_activity(self) -> None:
+        """Records local user activity and restores Active status if Auto-Away."""
+        self._last_activity = time.time()
+        if self._auto_away_active:
+            self._auto_away_active = False
+            self.status = "Active"
+            self.send_presence("heartbeat")
+
+    def notify_typing(self) -> None:
+        """Throttled typing indicator broadcast on local buffer changes."""
+        now = time.time()
+        self.record_activity()
+        if now - self._last_typing_sent >= TYPING_THROTTLE_SECONDS:
+            self._last_typing_sent = now
+            self.send_presence("typing")
 
     def get_peer_names(self) -> List[str]:
         with self._lock:
             return sorted(self.peers.keys(), key=str.lower)
 
-    def get_peer_count(self) -> int:
+    def get_pending_file_ids(self) -> List[str]:
         with self._lock:
-            return len(self.peers)
+            return list(self.pending_files.keys())
 
     def get_log_filepath(self) -> str:
         log_dir = os.path.expanduser("~/.bstkchat/logs")
         safe_room = sanitize_room_id(self.room_id)
         return os.path.join(log_dir, f"{safe_room}.log")
+
+    def _ring_bell(self) -> None:
+        if not self.muted:
+            sys.stdout.write("\a")
+            sys.stdout.flush()
 
     def safe_print(self, *renderables, **kwargs) -> None:
         """
@@ -242,7 +345,7 @@ class ChatClient:
 
     def write_to_log(self, text_to_log: str) -> None:
         """Saves chat logs locally to ~/.bstkchat/logs/ with sanitized filenames."""
-        if not self.logging_enabled:
+        if not self.logging_enabled or self.ephemeral_log:
             return
         try:
             log_filepath = self.get_log_filepath()
@@ -264,7 +367,7 @@ class ChatClient:
         self.write_to_log(f"System: {log_text if log_text is not None else text}")
 
     def setup_mqtt(self) -> None:
-        """Initializes and connects the MQTT client with Last Will presence."""
+        """Initializes and connects the MQTT client with TLS (optional) and Last Will."""
         try:
             from paho.mqtt.enums import CallbackAPIVersion
 
@@ -275,6 +378,14 @@ class ChatClient:
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
         self.client.on_disconnect = self.on_disconnect
+
+        if self.use_tls:
+            try:
+                self.client.tls_set()
+            except Exception as exc:
+                self.safe_print(
+                    f"[bold yellow]⚠ TLS setup warning: {escape_markup(str(exc))}[/]"
+                )
 
         will_payload = json.dumps({
             "sender": self.nickname,
@@ -288,7 +399,7 @@ class ChatClient:
             self.client.loop_start()
         except Exception as exc:
             self.safe_print(
-                f"[bold red]CRITICAL: Could not connect to broker at {self.broker}:{self.port}[/]",
+                f"[bold red]CRITICAL: Could not connect to broker at {escape_markup(self.broker)}:{self.port}[/]",
                 f"[yellow]Error detail: {escape_markup(str(exc))}[/]",
             )
             sys.exit(1)
@@ -299,9 +410,12 @@ class ChatClient:
             self.connected = True
             msg_topic = self.msg_topic
             presence_topic = self.presence_topic
+            sync_topic = self.sync_topic
         self.client.subscribe(msg_topic)
         self.client.subscribe(presence_topic)
+        self.client.subscribe(sync_topic)
         self.send_presence("join")
+        self.request_sync()
 
     def on_disconnect(self, client, userdata, rc, *args, **kwargs) -> None:
         """Handles disconnection events gracefully."""
@@ -323,21 +437,23 @@ class ChatClient:
         sender = str(payload.get("sender", "Anonymous"))
         msg_type = str(payload.get("type", "message"))
 
-        # Ignore our own echoed traffic (sent messages, DMs, and renames render locally)
         if sender == self.nickname:
             return
 
         with self._lock:
             presence_topic = self.presence_topic
             msg_topic = self.msg_topic
+            sync_topic = self.sync_topic
 
         if msg.topic == presence_topic:
             self.handle_presence(sender, msg_type, payload)
         elif msg.topic == msg_topic:
             self.handle_chat_message(sender, msg_type, payload, msg.topic)
+        elif msg.topic == sync_topic:
+            self.handle_sync(sender, msg_type, payload, msg.topic)
 
     def handle_presence(self, sender: str, msg_type: str, payload: dict) -> None:
-        """Processes peer presence events (joins, leaves, heartbeats, renames)."""
+        """Processes peer presence events (joins, leaves, heartbeats, typing, renames)."""
         now = time.time()
         peer_status = str(payload.get("status", "Active"))
         safe_sender = escape_markup(sender)
@@ -359,6 +475,7 @@ class ChatClient:
         elif msg_type == "leave":
             removed = False
             with self._lock:
+                self.typing_peers.pop(sender, None)
                 if sender in self.peers:
                     del self.peers[sender]
                     removed = True
@@ -372,11 +489,17 @@ class ChatClient:
             with self._lock:
                 self.peers[sender] = {"last_seen": now, "status": peer_status}
 
+        elif msg_type == "typing":
+            with self._lock:
+                self.peers[sender] = {"last_seen": now, "status": peer_status}
+                self.typing_peers[sender] = now
+
         elif msg_type == "rename":
             old_name = str(payload.get("old", sender))
             new_name = str(payload.get("new", sender))
             with self._lock:
                 self.peers.pop(old_name, None)
+                self.typing_peers.pop(old_name, None)
                 self.peers[new_name] = {"last_seen": now, "status": peer_status}
             self.print_system(
                 f"🔄 [bold {get_user_color(old_name)}]{escape_markup(old_name)}[/] "
@@ -384,16 +507,57 @@ class ChatClient:
                 log_text=f"{old_name} changed nickname to {new_name}",
             )
 
+    def _render_incoming_text(
+        self, timestamp: str, sender: str, text: str, is_mention: bool = False, is_dm: bool = False
+    ) -> None:
+        safe_sender = escape_markup(sender)
+        color = get_user_color(sender)
+
+        if is_dm:
+            if self.compact_mode:
+                self.safe_print(
+                    f"[dim gray][{timestamp}][/] [bold magenta]🔒 DM from {safe_sender}:[/] {escape_markup(text)}"
+                )
+            else:
+                self.safe_print(
+                    f"[dim gray][{timestamp}][/] [bold magenta]🔒 DM from {safe_sender}[/]:",
+                    Markdown(text),
+                )
+            return
+
+        if is_mention:
+            if self.compact_mode:
+                self.safe_print(
+                    f"🔔 [bold yellow][{timestamp}][/] [bold {color}]<{safe_sender}>[/] [bold]{escape_markup(text)}[/]"
+                )
+            else:
+                self.safe_print(
+                    f"🔔 [bold yellow]MENTION[/] [dim gray][{timestamp}][/] [bold {color}]<{safe_sender}>[/]:",
+                    Markdown(f"**{text}**"),
+                )
+            return
+
+        if self.compact_mode:
+            self.safe_print(
+                f"[dim gray][{timestamp}][/] [bold {color}]<{safe_sender}>[/] {escape_markup(text)}"
+            )
+        else:
+            self.safe_print(
+                f"[dim gray][{timestamp}][/] [bold {color}]<{safe_sender}>[/]:",
+                Markdown(text),
+            )
+
     def handle_chat_message(
         self, sender: str, msg_type: str, payload: dict, topic: str
     ) -> None:
-        """Decrypts and renders incoming chat messages and DMs."""
+        """Decrypts and renders incoming chat messages, DMs, and file offers."""
         timestamp = escape_markup(str(payload.get("time", datetime.now().strftime("%H:%M:%S"))))
         encrypted_text = str(payload.get("text", ""))
         safe_sender = escape_markup(sender)
         color = get_user_color(sender)
 
         with self._lock:
+            self.typing_peers.pop(sender, None)
             key = self.secret_key
 
         ok, decrypted_text = decrypt_message(
@@ -408,33 +572,226 @@ class ChatClient:
             self.write_to_log(f"<{sender}>: {decrypted_text}")
             return
 
+        if msg_type == "file":
+            self._handle_incoming_file(sender, decrypted_text)
+            return
+
         if msg_type == "dm":
             target = str(payload.get("target", ""))
             if target == self.nickname:
-                self.safe_print(
-                    f"[dim gray][{timestamp}][/] [bold magenta]🔒 DM from {safe_sender}[/]:",
-                    Markdown(decrypted_text),
-                )
+                self._render_incoming_text(timestamp, sender, decrypted_text, is_dm=True)
                 self.write_to_log(f"DM from {sender}: {decrypted_text}")
-                sys.stdout.write("\a")
-                sys.stdout.flush()
+                self._ring_bell()
             return
 
-        if is_user_mentioned(decrypted_text, self.nickname):
-            self.safe_print(
-                f"🔔 [bold yellow]MENTION[/] [dim gray][{timestamp}][/] "
-                f"[bold {color}]<{safe_sender}>[/]:",
-                Markdown(f"**{decrypted_text}**"),
-            )
+        mentioned = is_user_mentioned(decrypted_text, self.nickname)
+        self._render_incoming_text(timestamp, sender, decrypted_text, is_mention=mentioned)
+        if mentioned:
             self.write_to_log(f"Mentioned by {sender}: {decrypted_text}")
-            sys.stdout.write("\a")
-            sys.stdout.flush()
+            self._ring_bell()
         else:
-            self.safe_print(
-                f"[dim gray][{timestamp}][/] [bold {color}]<{safe_sender}>[/]:",
-                Markdown(decrypted_text),
-            )
             self.write_to_log(f"<{sender}>: {decrypted_text}")
+
+        if msg_type == "message":
+            msg_id = str(
+                payload.get("id")
+                or hashlib.sha256(f"{sender}:{timestamp}:{encrypted_text}".encode("utf-8")).hexdigest()
+            )
+            ts = float(payload.get("ts") or time.time())
+            self.chain.append_message(msg_id, ts, timestamp, sender, "message", encrypted_text)
+
+    def request_sync(self, limit: int = 100) -> None:
+        """Broadcasts a decentralized history sync request to online room peers."""
+        if not self.client or not self.chain.enabled:
+            return
+        with self._lock:
+            topic = self.sync_topic
+        payload = {
+            "sender": self.nickname,
+            "type": "sync_request",
+            "known_ids": self.chain.get_known_ids(),
+            "limit": limit,
+        }
+        try:
+            self.client.publish(topic, json.dumps(payload), qos=1)
+        except Exception:
+            pass
+
+    def handle_sync(self, sender: str, msg_type: str, payload: dict, sync_topic: str) -> None:
+        """Handles decentralized peer-to-peer room chain sync requests and responses."""
+        if not self.chain.enabled:
+            return
+
+        if msg_type == "sync_request":
+            raw_known = payload.get("known_ids", [])
+            known_ids = {str(x) for x in raw_known} if isinstance(raw_known, list) else set()
+            try:
+                limit = max(1, min(500, int(payload.get("limit", 100))))
+            except (TypeError, ValueError):
+                limit = 100
+            missing = self.chain.get_missing_blocks(known_ids, limit=limit)
+            if missing and self.client:
+                resp = {
+                    "sender": self.nickname,
+                    "type": "sync_response",
+                    "target": sender,
+                    "blocks": missing,
+                }
+                try:
+                    self.client.publish(sync_topic, json.dumps(resp), qos=1)
+                except Exception:
+                    pass
+
+        elif msg_type == "sync_response":
+            if str(payload.get("target", "")) != self.nickname:
+                return
+            blocks = payload.get("blocks", [])
+            if not isinstance(blocks, list):
+                return
+            added = self.chain.merge_blocks(blocks)
+            if not added:
+                return
+
+            with self._lock:
+                key = self.secret_key
+                aad = self.msg_topic.encode("utf-8")
+
+            self.print_system(
+                f"🔗 Synced {len(added)} message(s) from [bold {get_user_color(sender)}]{escape_markup(sender)}[/].",
+                log_text=f"Synced {len(added)} message(s) from {sender}",
+            )
+            for block in added:
+                ok, text = decrypt_message(str(block.get("ciphertext", "")), key, aad=aad)
+                if ok:
+                    self._render_incoming_text(
+                        escape_markup(str(block.get("time", "--:--:--"))),
+                        str(block.get("sender", "Peer")),
+                        text,
+                    )
+
+    def replay_recent_chain(self, limit: int = 10) -> None:
+        """Displays recent decrypted blocks from the local room chain on join."""
+        if not self.chain.enabled:
+            return
+        recent = self.chain.get_recent_blocks(limit=limit)
+        if not recent:
+            return
+        with self._lock:
+            key = self.secret_key
+            aad = self.msg_topic.encode("utf-8")
+        rendered = 0
+        for block in recent:
+            ok, text = decrypt_message(str(block.get("ciphertext", "")), key, aad=aad)
+            if ok:
+                if rendered == 0:
+                    self.print_system(f"⛓️  Loaded {len(recent)} recent block(s) from local room chain:")
+                self._render_incoming_text(
+                    escape_markup(str(block.get("time", "--:--:--"))),
+                    str(block.get("sender", "Peer")),
+                    text,
+                )
+                rendered += 1
+
+    def _handle_incoming_file(self, sender: str, decrypted_json: str) -> None:
+        try:
+            file_obj = json.loads(decrypted_json)
+            filename = str(file_obj["filename"])
+            b64_data = str(file_obj["data"])
+            expected_sha = str(file_obj.get("sha256", ""))
+            raw_bytes = base64.b64decode(b64_data.encode("ascii"))
+        except Exception:
+            self.print_system(f"Received malformed file offer from {escape_markup(sender)}.")
+            return
+
+        if len(raw_bytes) > MAX_FILE_BYTES:
+            self.print_system(
+                f"Rejected oversized file from {escape_markup(sender)} ({len(raw_bytes)} bytes)."
+            )
+            return
+
+        actual_sha = hashlib.sha256(raw_bytes).hexdigest()
+        if expected_sha and actual_sha != expected_sha:
+            self.print_system(
+                f"Rejected file from {escape_markup(sender)}: checksum mismatch."
+            )
+            return
+
+        with self._lock:
+            self._file_seq += 1
+            file_id = str(self._file_seq)
+            self.pending_files[file_id] = {
+                "sender": sender,
+                "filename": filename,
+                "data": raw_bytes,
+                "size": len(raw_bytes),
+            }
+
+        size_kb = len(raw_bytes) / 1024.0
+        self.print_system(
+            f"📎 [bold {get_user_color(sender)}]{escape_markup(sender)}[/] sent file "
+            f"[bold white]{escape_markup(filename)}[/] ({size_kb:.1f} KB). "
+            f"Type [bold cyan]/accept {file_id}[/] to save.",
+            log_text=f"{sender} sent file {filename} ({len(raw_bytes)} bytes)",
+        )
+        self._ring_bell()
+
+    def accept_file(self, file_id: Optional[str] = None, target_dir: str = "") -> Optional[str]:
+        """Saves a pending encrypted file transfer to ~/Downloads/bstkchat."""
+        with self._lock:
+            if not self.pending_files:
+                self.print_system("No pending files to accept.")
+                return None
+            if not file_id:
+                file_id = list(self.pending_files.keys())[-1]
+            entry = self.pending_files.pop(file_id, None)
+
+        if not entry:
+            self.print_system(f"File ID '{escape_markup(str(file_id))}' not found.")
+            return None
+
+        saved_path = save_received_file(
+            str(entry["filename"]), bytes(entry["data"]), target_dir=target_dir
+        )
+        self.print_system(
+            f"💾 Saved file to [bold green]{escape_markup(saved_path)}[/]",
+            log_text=f"Saved file to {saved_path}",
+        )
+        return saved_path
+
+    def send_file(self, filepath: str) -> bool:
+        """Reads, checksums, encrypts, and broadcasts a file up to MAX_FILE_BYTES."""
+        expanded = os.path.expanduser(filepath)
+        if not os.path.isfile(expanded):
+            self.print_system(f"File not found: {escape_markup(filepath)}")
+            return False
+
+        size = os.path.getsize(expanded)
+        if size > MAX_FILE_BYTES:
+            self.print_system(
+                f"File too large ({size // 1024} KB). Max allowed is {MAX_FILE_BYTES // 1024} KB."
+            )
+            return False
+
+        try:
+            with open(expanded, "rb") as f:
+                raw_bytes = f.read()
+        except OSError as exc:
+            self.print_system(f"Could not read file: {escape_markup(str(exc))}")
+            return False
+
+        payload_json = json.dumps({
+            "filename": os.path.basename(expanded),
+            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "data": base64.b64encode(raw_bytes).decode("ascii"),
+        })
+        if self._publish_encrypted("file", payload_json):
+            self.print_system(
+                f"📤 Sent encrypted file [bold white]{escape_markup(os.path.basename(expanded))}[/] "
+                f"({len(raw_bytes) / 1024:.1f} KB).",
+                log_text=f"Sent file {os.path.basename(expanded)}",
+            )
+            return True
+        return False
 
     def send_presence(self, status_type: str, extra_data: Optional[dict] = None) -> None:
         """Broadcasts a presence payload."""
@@ -467,18 +824,25 @@ class ChatClient:
             key = self.secret_key
             topic = self.msg_topic
 
+        now_ts = time.time()
+        now_str = datetime.now().strftime("%H:%M:%S")
+        msg_id = uuid.uuid4().hex
         encrypted_text = encrypt_payload(text, key, aad=topic.encode("utf-8"))
         payload = {
+            "id": msg_id,
+            "ts": now_ts,
             "sender": self.nickname,
             "type": msg_type,
             "text": encrypted_text,
-            "time": datetime.now().strftime("%H:%M:%S"),
+            "time": now_str,
         }
         if extra:
             payload.update(extra)
 
         try:
             self.client.publish(topic, json.dumps(payload), qos=1)
+            if msg_type == "message":
+                self.chain.append_message(msg_id, now_ts, now_str, self.nickname, "message", encrypted_text)
             return True
         except Exception as exc:
             self.print_system(f"Error sending message: {escape_markup(str(exc))}")
@@ -486,22 +850,34 @@ class ChatClient:
 
     def send_chat_message(self, text: str) -> None:
         """Broadcasts an encrypted text chat message."""
+        self.record_activity()
         if self._publish_encrypted("message", text):
             timestamp = datetime.now().strftime("%H:%M:%S")
-            self.safe_print(
-                f"[dim gray][{timestamp}][/] [bold green]<You>[/]:",
-                Markdown(text),
-            )
+            if self.compact_mode:
+                self.safe_print(
+                    f"[dim gray][{timestamp}][/] [bold green]<You>[/] {escape_markup(text)}"
+                )
+            else:
+                self.safe_print(
+                    f"[dim gray][{timestamp}][/] [bold green]<You>[/]:",
+                    Markdown(text),
+                )
             self.write_to_log(f"<You>: {text}")
 
     def send_private_message(self, target: str, text: str) -> None:
         """Sends an encrypted Direct Message to a specific user in the room."""
+        self.record_activity()
         if self._publish_encrypted("dm", text, extra={"target": target}):
             timestamp = datetime.now().strftime("%H:%M:%S")
-            self.safe_print(
-                f"[dim gray][{timestamp}][/] [bold magenta]🔒 DM to {escape_markup(target)}[/]:",
-                Markdown(text),
-            )
+            if self.compact_mode:
+                self.safe_print(
+                    f"[dim gray][{timestamp}][/] [bold magenta]🔒 DM to {escape_markup(target)}:[/] {escape_markup(text)}"
+                )
+            else:
+                self.safe_print(
+                    f"[dim gray][{timestamp}][/] [bold magenta]🔒 DM to {escape_markup(target)}[/]:",
+                    Markdown(text),
+                )
             self.write_to_log(f"DM to {target}: {text}")
 
     def switch_room(self, new_room_id: str, new_password: str = "") -> None:
@@ -516,29 +892,39 @@ class ChatClient:
         with self._lock:
             old_msg_topic = self.msg_topic
             old_presence_topic = self.presence_topic
+            old_sync_topic = self.sync_topic
 
         if self.client:
             self.client.unsubscribe(old_msg_topic)
             self.client.unsubscribe(old_presence_topic)
+            self.client.unsubscribe(old_sync_topic)
 
         new_key = derive_room_key(sanitized_room, new_password)
+        new_chain = RoomChain(sanitized_room, enabled=self.chain.enabled)
 
         with self._lock:
             self.room_id = sanitized_room
             self.password = new_password
             self.secret_key = new_key
+            self.chain = new_chain
             self._update_topics(sanitized_room)
             self.peers.clear()
+            self.typing_peers.clear()
+            self.pending_files.clear()
             new_msg_topic = self.msg_topic
             new_presence_topic = self.presence_topic
+            new_sync_topic = self.sync_topic
 
         if self.client:
             self.client.subscribe(new_msg_topic)
             self.client.subscribe(new_presence_topic)
+            self.client.subscribe(new_sync_topic)
         self.send_presence("join")
 
         self.clear_screen()
         self.print_room_banner()
+        self.replay_recent_chain(10)
+        self.request_sync()
 
     def print_room_banner(self) -> None:
         """Displays a clean metadata panel for the current active room."""
@@ -547,10 +933,11 @@ class ChatClient:
             has_password = bool(self.password)
             peer_count = len(self.peers)
 
+        transport = "TLS" if self.use_tls else "TCP"
         banner_text = Text()
         banner_text.append("💬 Room: ", style="bold green")
         banner_text.append(f"{room_id}", style="bold white underline")
-        banner_text.append(f"  ({peer_count + 1} online)\n", style="dim white")
+        banner_text.append(f"  ({peer_count + 1} online • {transport})\n", style="dim white")
 
         banner_text.append("👤 Nick: ", style="bold cyan")
         banner_text.append(f"{self.nickname} ", style="bold white")
@@ -561,44 +948,95 @@ class ChatClient:
             banner_text.append("AES-256-GCM E2EE (Password Protected)\n", style="bold bright_green")
         else:
             banner_text.append("🔓 Security: ", style="bold yellow")
-            banner_text.append("Standard Room (No Password — use /room <id> <pass> for E2EE)\n", style="dim white")
+            banner_text.append("Public Room (Use /room <id> --lock for E2EE)\n", style="dim white")
 
-        banner_text.append("⌨️  Tip: ", style="bold magenta")
-        banner_text.append("Type / for command autocomplete, @ for mentions, or /help for all commands.", style="italic dim white")
+        banner_text.append("⌨️  Shortcuts: ", style="bold magenta")
+        banner_text.append(
+            "/ for commands • @ for mentions • Alt+Enter for newline • /help",
+            style="italic dim white",
+        )
 
         self.safe_print(
-            Panel(banner_text, title="[bold cyan]BSTK Chat[/]", box=box.ROUNDED, border_style="blue", expand=False),
+            Panel(
+                banner_text,
+                title=f"[bold cyan]BSTK Chat v{APP_VERSION}[/]",
+                box=box.ROUNDED,
+                border_style="blue",
+                expand=False,
+            ),
             "[bold dim yellow]⚡ System:[/] [dim white]Joined room. Markdown & syntax highlighting are active.[/]",
         )
 
     def render_bottom_toolbar(self) -> HTML:
         """Renders the live status bar at the bottom of the prompt."""
+        now = time.time()
         with self._lock:
             room = self.room_id
             peers = len(self.peers)
             has_pw = bool(self.password)
             is_conn = self.connected
+            active_typers = [
+                name
+                for name, ts in list(self.typing_peers.items())
+                if now - ts <= TYPING_TTL_SECONDS
+            ]
 
-        conn_badge = "<style fg='ansigreen'>● Connected</style>" if is_conn else "<style fg='ansiyellow'>● Reconnecting</style>"
-        e2ee_badge = "<style fg='ansigreen'>🔒 E2EE</style>" if has_pw else "<style fg='ansiyellow'>🔓 Public</style>"
-        log_badge = "📝 Log: ON" if self.logging_enabled else "📝 Log: OFF"
+        conn_badge = (
+            "<style fg='ansigreen'>● Connected</style>"
+            if is_conn
+            else "<style fg='ansiyellow'>● Reconnecting</style>"
+        )
+        e2ee_badge = (
+            "<style fg='ansigreen'>🔒 E2EE</style>"
+            if has_pw
+            else "<style fg='ansiyellow'>🔓 Public</style>"
+        )
+        if self.ephemeral_log:
+            log_badge = "📝 Ephemeral"
+        elif self.logging_enabled:
+            log_badge = "📝 Log: ON"
+        else:
+            log_badge = "📝 Log: OFF"
+
+        extras = []
+        if self.muted:
+            extras.append("🔇 Muted")
+        if self.multiline_mode:
+            extras.append("↵ Multi-line")
+        if active_typers:
+            who = ", ".join(active_typers[:2])
+            suffix = "…" if len(active_typers) > 2 else ""
+            extras.append(f"✎ {who}{suffix} typing")
+
+        extra_str = f" │ {' │ '.join(extras)}" if extras else ""
         return HTML(
-            f" {conn_badge} │ <b>#{room}</b> │ {e2ee_badge} │ 👥 {peers + 1} online │ {log_badge} │ <i>/help</i> "
+            f" {conn_badge} │ <b>#{room}</b> │ {e2ee_badge} │ 👥 {peers + 1} online │ {log_badge}{extra_str} │ <i>/help</i> "
         )
 
     def start_background_tasks(self) -> None:
-        """Runs the background heartbeat and peer pruning thread."""
+        """Runs the background heartbeat, peer pruning, and auto-away thread."""
         def run():
             while not self._stop_event.is_set():
+                now = time.time()
+                if (
+                    not self._auto_away_active
+                    and self.status == "Active"
+                    and now - self._last_activity >= AUTO_AWAY_SECONDS
+                ):
+                    self._auto_away_active = True
+                    self.status = "Auto-Away"
+
                 self.send_presence("heartbeat")
 
-                now = time.time()
                 stale_peers = []
                 with self._lock:
                     for name, info in list(self.peers.items()):
                         if now - float(info["last_seen"]) > 45:
                             stale_peers.append(name)
                             del self.peers[name]
+                    for name, ts in list(self.typing_peers.items()):
+                        if now - ts > TYPING_TTL_SECONDS:
+                            del self.typing_peers[name]
 
                 for peer in stale_peers:
                     self.print_system(
@@ -643,6 +1081,53 @@ class ChatClient:
         if self.client:
             self.client.loop_stop()
             self.client.disconnect()
+        if self.ephemeral_log:
+            try:
+                log_path = self.get_log_filepath()
+                if os.path.exists(log_path):
+                    os.remove(log_path)
+            except OSError:
+                pass
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="bstkchat",
+        description="Real-time E2EE terminal chat over MQTT.",
+    )
+    parser.add_argument("--nick", help="Nickname to use in the chat room")
+    parser.add_argument("--room", help="Room ID to join")
+    parser.add_argument("--password", help="Room password for AES-256-GCM E2EE")
+    parser.add_argument("--broker", help=f"MQTT broker host (default: {DEFAULT_BROKER})")
+    parser.add_argument("--port", type=int, help="MQTT broker port")
+    parser.add_argument("--no-tls", action="store_true", help="Disable TLS (use plain TCP)")
+    parser.add_argument("--theme", choices=VALID_THEMES, help="Toolbar theme")
+    parser.add_argument("--compact", action="store_true", help="Use compact single-line messages")
+    parser.add_argument("--no-log", action="store_true", help="Disable local session logging")
+    parser.add_argument("--no-store", action="store_true", help="Disable decentralized room chain storage")
+    parser.add_argument("--version", action="version", version=f"bstkchat {APP_VERSION}")
+    return parser
+
+
+def build_key_bindings(chat: ChatClient) -> KeyBindings:
+    """Supports Alt+Enter newline in single-line mode and Enter newline in /multiline."""
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _(event):
+        if chat.multiline_mode:
+            event.current_buffer.insert_text("\n")
+        else:
+            event.current_buffer.validate_and_handle()
+
+    @kb.add("escape", "enter")
+    def _(event):
+        if chat.multiline_mode:
+            event.current_buffer.validate_and_handle()
+        else:
+            event.current_buffer.insert_text("\n")
+
+    return kb
 
 
 def show_welcome(console: Console) -> None:
@@ -668,10 +1153,10 @@ def show_welcome(console: Console) -> None:
             console.print("[bold cyan]═══ BSTK CHAT ═══[/]")
         console.print(
             Panel(
-                "[bold white]BSTK Terminal Chat v2.2.0[/]\n"
-                "• AES-256-GCM End-to-End Encryption with room passwords\n"
-                "• Rich Markdown, Syntax Highlighting & Autocomplete\n"
-                "• Private DMs, @Mentions, Audio Alerts & Local Logs",
+                f"[bold white]BSTK Terminal Chat v{APP_VERSION}[/]\n"
+                "• AES-256-GCM End-to-End Encryption & TLS transport\n"
+                "• Rich Markdown, Autocomplete, Multi-line & Themes\n"
+                "• Encrypted File Sharing, DMs, @Mentions & Log Search",
                 box=box.ROUNDED,
                 border_style="cyan",
                 expand=False,
@@ -680,59 +1165,108 @@ def show_welcome(console: Console) -> None:
     print_formatted_text(ANSI(capture.get()), end="")
 
 
-def main() -> None:
+def main(argv: Optional[List[str]] = None) -> None:
     configure_stdio()
+    args = build_arg_parser().parse_args(argv)
+    cfg = load_config()
+
     console = Console(force_terminal=True)
-    show_welcome(console)
+    if not (args.nick and args.room):
+        show_welcome(console)
     setup_session = PromptSession()
 
     # Phase 1: Establish Identity
-    try:
-        nick_input = setup_session.prompt("👤 Choose your Nickname (Enter for random): ")
-    except (KeyboardInterrupt, EOFError):
-        print_formatted_text("\nExit requested.")
-        return
-    nickname = nick_input.strip() or f"User-{random.randint(100, 999)}"
+    if args.nick:
+        nickname = args.nick.strip()
+    else:
+        default_nick = str(cfg.get("nickname", "")).strip()
+        prompt_label = (
+            f"👤 Choose your Nickname (Enter for {default_nick}): "
+            if default_nick
+            else "👤 Choose your Nickname (Enter for random): "
+        )
+        try:
+            nick_input = setup_session.prompt(prompt_label)
+        except (KeyboardInterrupt, EOFError):
+            print_formatted_text("\nExit requested.")
+            return
+        nickname = nick_input.strip() or default_nick or f"User-{random.randint(100, 999)}"
 
     # Phase 2: Enter Room
-    suggested_room = generate_room_id()
-    try:
-        room_input = setup_session.prompt(
-            f"🔑 Room ID to join (Enter for {suggested_room}): "
-        )
-    except (KeyboardInterrupt, EOFError):
-        print_formatted_text("\nExit requested.")
-        return
-    room_id = room_input.strip() or suggested_room
+    if args.room:
+        room_id = args.room.strip()
+    else:
+        suggested_room = generate_room_id()
+        try:
+            room_input = setup_session.prompt(
+                f"🔑 Room ID to join (Enter for {suggested_room}): "
+            )
+        except (KeyboardInterrupt, EOFError):
+            print_formatted_text("\nExit requested.")
+            return
+        room_id = room_input.strip() or suggested_room
 
     # Phase 3: Setup E2EE Password
-    try:
-        password = setup_session.prompt(
-            "🔐 Room Password for E2EE (Enter for public room): ", is_password=True
-        )
-    except (KeyboardInterrupt, EOFError):
-        print_formatted_text("\nExit requested.")
-        return
+    if args.password is not None:
+        password = args.password
+    elif args.room and args.nick:
+        password = ""
+    else:
+        try:
+            password = setup_session.prompt(
+                "🔐 Room Password for E2EE (Enter for public room): ", is_password=True
+            )
+        except (KeyboardInterrupt, EOFError):
+            print_formatted_text("\nExit requested.")
+            return
 
-    # Phase 4: Connect and Start
-    chat = ChatClient(nickname, room_id, password)
+    use_tls = not args.no_tls if args.no_tls else bool(cfg.get("tls", True))
+    broker = args.broker or str(cfg.get("broker", DEFAULT_BROKER))
+    default_port = DEFAULT_TLS_PORT if use_tls else DEFAULT_PLAIN_PORT
+    port = args.port or int(cfg.get("port", default_port))
+    theme = args.theme or str(cfg.get("theme", "dark"))
+    compact = bool(args.compact or cfg.get("compact", False))
+    logging_enabled = not args.no_log
+
+    cfg.update({"nickname": nickname, "theme": theme, "compact": compact})
+    save_config(cfg)
+
+    chat = ChatClient(
+        nickname=nickname,
+        room_id=room_id,
+        password=password,
+        broker=broker,
+        port=port,
+        use_tls=use_tls,
+        theme=theme,
+        compact=compact,
+        logging_enabled=logging_enabled,
+        store_chain=not args.no_store,
+    )
     chat.setup_mqtt()
     chat.start_background_tasks()
 
     chat.clear_screen()
     chat.print_room_banner()
+    chat.replay_recent_chain(10)
 
-    prompt_style = PromptStyle.from_dict({
-        "prompt": "bold fg:ansicyan",
-        "bottom-toolbar": "bg:#1e293b fg:#e2e8f0",
-    })
+    dynamic_style = DynamicStyle(
+        lambda: PromptStyle.from_dict(THEME_STYLES.get(chat.theme, THEME_STYLES["dark"]))
+    )
     chat_session = PromptSession(
         history=InMemoryHistory(),
         completer=ChatCompleter(chat),
         complete_while_typing=True,
         bottom_toolbar=chat.render_bottom_toolbar,
-        style=prompt_style,
+        style=dynamic_style,
+        key_bindings=build_key_bindings(chat),
     )
+
+    def _on_text_changed(_):
+        if chat_session.default_buffer.text:
+            chat.notify_typing()
+
+    chat_session.default_buffer.on_text_changed += _on_text_changed
 
     with patch_stdout():
         while chat.running:
@@ -741,6 +1275,8 @@ def main() -> None:
                 user_msg = user_msg.strip()
                 if not user_msg:
                     continue
+
+                chat.record_activity()
 
                 if user_msg.startswith("/"):
                     parts = parse_command_args(user_msg)
@@ -752,10 +1288,15 @@ def main() -> None:
 
                     elif cmd == "/room":
                         if len(parts) < 2:
-                            chat.print_system("Usage: /room <room_id> [optional_password]")
+                            chat.print_system("Usage: /room <room_id> [password|--lock]")
                         else:
                             new_room = parts[1]
-                            new_pass = parts[2] if len(parts) > 2 else ""
+                            if len(parts) > 2 and parts[2] in ("--lock", "-p"):
+                                new_pass = chat_session.prompt(
+                                    "🔐 Enter Room Password: ", is_password=True
+                                )
+                            else:
+                                new_pass = parts[2] if len(parts) > 2 else ""
                             chat.switch_room(new_room, new_pass)
 
                     elif cmd == "/nick":
@@ -769,6 +1310,8 @@ def main() -> None:
                                 old_nick = chat.nickname
                                 chat.send_presence("rename", {"old": old_nick, "new": new_nick})
                                 chat.nickname = new_nick
+                                cfg["nickname"] = new_nick
+                                save_config(cfg)
                                 chat.print_system(
                                     f"Nickname updated to [bold]{escape_markup(new_nick)}[/]",
                                     log_text=f"Nickname updated to {new_nick}",
@@ -778,12 +1321,21 @@ def main() -> None:
                         if len(parts) < 3:
                             chat.print_system("Usage: /msg <recipient_name> <message>")
                         else:
-                            recipient = parts[1]
-                            dm_text = " ".join(parts[2:])
-                            chat.send_private_message(recipient, dm_text)
+                            chat.send_private_message(parts[1], " ".join(parts[2:]))
+
+                    elif cmd == "/send":
+                        if len(parts) < 2:
+                            chat.print_system("Usage: /send <filepath>")
+                        else:
+                            chat.send_file(" ".join(parts[1:]))
+
+                    elif cmd == "/accept":
+                        fid = parts[1] if len(parts) > 1 else None
+                        chat.accept_file(fid)
 
                     elif cmd == "/status":
                         chat.status = "Active" if len(parts) < 2 else " ".join(parts[1:])
+                        chat._auto_away_active = False
                         chat.send_presence("heartbeat")
                         chat.print_system(
                             f"Status changed to: [italic yellow]{escape_markup(chat.status)}[/]",
@@ -793,19 +1345,122 @@ def main() -> None:
                     elif cmd in ("/who", "/users"):
                         chat.show_users()
 
+                    elif cmd == "/invite":
+                        tls_flag = "" if chat.use_tls else " --no-tls"
+                        broker_flag = f" --broker {chat.broker}" if chat.broker != DEFAULT_BROKER else ""
+                        invite_cmd = f"bstkchat --room {chat.room_id}{broker_flag}{tls_flag}"
+                        note = " (share password separately)" if chat.password else ""
+                        chat.print_system(
+                            f"Invite command{note}: [bold cyan]{escape_markup(invite_cmd)}[/]",
+                            log_text=f"Invite: {invite_cmd}",
+                        )
+
+                    elif cmd == "/history":
+                        limit = 15
+                        if len(parts) > 1 and parts[1].isdigit():
+                            limit = max(1, min(100, int(parts[1])))
+                        lines = tail_log(chat.get_log_filepath(), limit=limit)
+                        if not lines:
+                            chat.print_system("No local log history for this room yet.")
+                        else:
+                            chat.safe_print(
+                                Panel(
+                                    "\n".join(escape_markup(line) for line in lines),
+                                    title=f"[bold cyan]Last {len(lines)} log entries[/]",
+                                    box=box.ROUNDED,
+                                    border_style="dim",
+                                    expand=False,
+                                )
+                            )
+
+                    elif cmd == "/search":
+                        if len(parts) < 2:
+                            chat.print_system("Usage: /search <query>")
+                        else:
+                            query = " ".join(parts[1:])
+                            matches = search_log(chat.get_log_filepath(), query)
+                            if not matches:
+                                chat.print_system(f"No matches for '{escape_markup(query)}'.")
+                            else:
+                                chat.safe_print(
+                                    Panel(
+                                        "\n".join(escape_markup(m) for m in matches),
+                                        title=f"[bold green]Search: {escape_markup(query)} ({len(matches)})[/]",
+                                        box=box.ROUNDED,
+                                        border_style="green",
+                                        expand=False,
+                                    )
+                                )
+
+                    elif cmd == "/chain":
+                        if not chat.chain.enabled:
+                            chat.print_system("Decentralized chain storage is disabled (--no-store).")
+                        else:
+                            valid, count = chat.chain.verify_integrity()
+                            badge = "[bold green]✓ Valid[/]" if valid else "[bold red]✗ Tampered[/]"
+                            chat.print_system(
+                                f"Room chain #{escape_markup(chat.room_id)}: [bold]{count}[/] block(s) • "
+                                f"Integrity: {badge} • Store: [italic]{escape_markup(chat.chain.filepath)}[/]"
+                            )
+
+                    elif cmd == "/sync":
+                        limit = 100
+                        if len(parts) > 1 and parts[1].isdigit():
+                            limit = max(1, min(500, int(parts[1])))
+                        chat.request_sync(limit=limit)
+                        chat.print_system(f"Requested up to {limit} missing message(s) from online peers.")
+
                     elif cmd == "/log":
                         if len(parts) > 1 and parts[1].lower() in ("off", "disable"):
                             chat.logging_enabled = False
+                            chat.ephemeral_log = False
                             chat.print_system("Session logging disabled.")
                         elif len(parts) > 1 and parts[1].lower() in ("on", "enable"):
                             chat.logging_enabled = True
+                            chat.ephemeral_log = False
                             chat.print_system("Session logging enabled.")
+                        elif len(parts) > 1 and parts[1].lower() == "ephemeral":
+                            chat.ephemeral_log = True
+                            chat.logging_enabled = False
+                            chat.print_system("Ephemeral mode enabled (room log will be cleared on exit).")
                         else:
-                            status_str = "ENABLED" if chat.logging_enabled else "DISABLED"
+                            status_str = (
+                                "EPHEMERAL"
+                                if chat.ephemeral_log
+                                else ("ENABLED" if chat.logging_enabled else "DISABLED")
+                            )
                             chat.print_system(
                                 f"Session logging is [bold]{status_str}[/]. "
                                 f"Log file: [italic white]{escape_markup(chat.get_log_filepath())}[/]"
                             )
+
+                    elif cmd == "/mute":
+                        chat.muted = not chat.muted
+                        state = "MUTED" if chat.muted else "UNMUTED"
+                        chat.print_system(f"Audio alerts are now [bold]{state}[/].")
+
+                    elif cmd == "/compact":
+                        chat.compact_mode = not chat.compact_mode
+                        cfg["compact"] = chat.compact_mode
+                        save_config(cfg)
+                        state = "ON" if chat.compact_mode else "OFF"
+                        chat.print_system(f"Compact message mode is now [bold]{state}[/].")
+
+                    elif cmd == "/multiline":
+                        chat.multiline_mode = not chat.multiline_mode
+                        if chat.multiline_mode:
+                            chat.print_system("Multi-line mode ON (Enter = newline, Alt+Enter = send).")
+                        else:
+                            chat.print_system("Multi-line mode OFF (Enter = send, Alt+Enter = newline).")
+
+                    elif cmd == "/theme":
+                        if len(parts) < 2 or parts[1].lower() not in VALID_THEMES:
+                            chat.print_system(f"Usage: /theme <{'|'.join(VALID_THEMES)}>")
+                        else:
+                            chat.theme = parts[1].lower()
+                            cfg["theme"] = chat.theme
+                            save_config(cfg)
+                            chat.print_system(f"Toolbar theme set to [bold]{chat.theme}[/].")
 
                     elif cmd == "/clear":
                         chat.clear_screen()
@@ -820,14 +1475,9 @@ def main() -> None:
                         )
                         table.add_column("Command", style="cyan")
                         table.add_column("Description", style="white")
-                        table.add_row("/room <id> [pass]", "Switch rooms, optionally encrypting with password")
-                        table.add_row("/nick <name>", "Change your active nickname")
-                        table.add_row("/msg <user> <msg>", "Send an encrypted private DM to a user")
-                        table.add_row("/status <text>", "Set a custom status message (e.g. AFK, Coding)")
-                        table.add_row("/who", "List all online users and their statuses")
-                        table.add_row("/log [on/off]", "Enable/disable session logging or view log path")
-                        table.add_row("/clear", "Clear terminal screen")
-                        table.add_row("/exit", "Disconnect and close the app")
+                        for cmd_name, desc in COMMANDS:
+                            if cmd_name not in ("/users", "/quit"):
+                                table.add_row(cmd_name, desc)
                         chat.safe_print(table)
 
                     else:

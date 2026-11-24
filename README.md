@@ -6,16 +6,17 @@
 
 ## Features
 
-- **Zero Configuration:** Connects automatically over MQTT (`broker.hivemq.com`) with no servers, accounts, or port forwarding.
+- **Zero Configuration + CLI Flags:** Connects automatically over MQTT (`broker.hivemq.com`) with TLS (`8883`) enabled by default, or use `--nick`, `--room`, `--password`, `--broker`, `--port`, and `--no-tls`.
 - **End-to-End Encryption (E2EE):** Protect rooms with a password using `scrypt` key derivation, per-message random 96-bit nonces, **AES-256-GCM** authenticated encryption, and topic-bound AAD.
+- **Encrypted File Sharing:** Send files up to 512 KB with `/send <filepath>`, verified with SHA-256 and saved safely via `/accept [id]`.
 - **Modern Terminal UI/UX:**
-  - Non-blocking input powered by `prompt_toolkit` so incoming messages never interrupt what you are typing.
-  - Live bottom status bar showing connection state, active `#room`, E2EE badge, online user count, and logging state.
-  - Context-aware autocomplete for `/` commands, `/msg <user>`, `/log [on|off]`, and `@mentions`, plus `↑`/`↓` command history.
-- **Rich Markdown & Syntax Highlighting:** Send formatted text, inline code, and fenced code blocks rendered cleanly with `rich`.
-- **Private DMs & `@Mention` Alerts:** Send encrypted direct messages with `/msg` and receive highlighted notifications + terminal bell alerts when mentioned.
-- **Presence & Heartbeats:** Automatic join/leave announcements, Last Will disconnect detection, custom `/status` messages, and `/who` user tables.
-- **Safe Local Logging:** Saves transcripts to `~/.bstkchat/logs/<room>.log` with sanitized filenames and `/log on|off` controls.
+  - Non-blocking input powered by `prompt_toolkit` with `Alt+Enter` multi-line editing (or `/multiline` toggle).
+  - Live bottom status bar showing connection state, active `#room`, E2EE badge, online count, logging state, and live `typing...` indicators.
+  - Switchable toolbar themes (`/theme dark|light|ansi`) and compact single-line mode (`/compact`).
+  - Context-aware autocomplete for `/` commands, `/msg`, `/accept`, `/theme`, `/log`, and `@mentions`, plus `↑`/`↓` command history.
+- **Rich Markdown, DMs & Presence:** Send formatted Markdown, encrypted DMs (`/msg`), audio/mention alerts (`/mute` to toggle), auto-away status, and `/who` user tables.
+- **Decentralized Encrypted Room Chain & Peer Sync:** Every room maintains an append-only, SHA-256 hash-linked encrypted store (`~/.bstkchat/chains/<room>.json`) on each participant's device. When new peers join, online peers automatically sync missing encrypted messages (`/chain`, `/sync`, or `--no-store` to opt out).
+- **Local Logs, History & Search:** Saves sanitized transcripts to `~/.bstkchat/logs/<room>.log` with `/history`, `/search`, `/log on|off|ephemeral`, and saved preferences in `~/.bstkchat/config.json`.
 
 ---
 
@@ -98,12 +99,23 @@ Alice > /log off
 | Command | Description |
 | :--- | :--- |
 | `/help` | Displays a formatted table of all available commands |
-| `/room <id> [password]` | Switches rooms and optionally enables AES-256-GCM E2EE |
+| `/room <id> [password\|--lock]` | Switches rooms; use `--lock` to prompt for password without saving it in history |
 | `/nick <name>` | Changes your nickname and notifies peers in the room |
 | `/msg <user> <message>` | Sends an encrypted private direct message (DM) to a user |
+| `/send <filepath>` | Sends an encrypted file (up to 512 KB) with SHA-256 verification |
+| `/accept [id]` | Accepts a pending file transfer and saves it to `~/Downloads/bstkchat/` |
 | `/status <text>` | Sets your custom status message (e.g., `AFK`, `Coding`) |
 | `/who` or `/users` | Lists all online participants, statuses, and last-seen times |
-| `/log [on\|off]` | Toggles local session logging or displays the log file path |
+| `/invite` | Prints a copyable `bstkchat --room ...` command to invite others |
+| `/history [N]` | Displays the last `N` lines (default 15) from the room's local log |
+| `/search <query>` | Searches the current room's local log file |
+| `/chain` | Shows the decentralized room chain block count, integrity check, and path |
+| `/sync [N]` | Requests up to `N` missing encrypted messages from online peers |
+| `/log [on\|off\|ephemeral]` | Controls local logging (`ephemeral` deletes the room log on exit) |
+| `/mute` | Toggles terminal bell alerts for mentions, DMs, and file offers |
+| `/compact` | Toggles compact single-line message rendering |
+| `/multiline` | Toggles multi-line input (`Enter` = newline, `Alt+Enter` = send) |
+| `/theme <dark\|light\|ansi>` | Switches the bottom status bar theme |
 | `/clear` | Clears the terminal screen and redraws the room banner |
 | `/exit` or `/quit` | Announces departure and exits cleanly |
 

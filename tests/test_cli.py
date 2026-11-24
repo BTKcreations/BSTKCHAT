@@ -97,6 +97,14 @@ def _ensure_cli_dependencies():
             hist_mod = types.ModuleType("prompt_toolkit.history")
             hist_mod.InMemoryHistory = MagicMock
 
+            kb_mod = types.ModuleType("prompt_toolkit.key_binding")
+
+            class _DummyKB:
+                def add(self, *args, **kwargs):
+                    return lambda fn: fn
+
+            kb_mod.KeyBindings = _DummyKB
+
             patch_mod = types.ModuleType("prompt_toolkit.patch_stdout")
             patch_mod.patch_stdout = MagicMock
 
@@ -105,11 +113,13 @@ def _ensure_cli_dependencies():
 
             styles_mod = types.ModuleType("prompt_toolkit.styles")
             styles_mod.Style = MagicMock
+            styles_mod.DynamicStyle = MagicMock
 
             sys.modules["prompt_toolkit"] = pt_mod
             sys.modules["prompt_toolkit.completion"] = comp_mod
             sys.modules["prompt_toolkit.formatted_text"] = fmt_mod
             sys.modules["prompt_toolkit.history"] = hist_mod
+            sys.modules["prompt_toolkit.key_binding"] = kb_mod
             sys.modules["prompt_toolkit.patch_stdout"] = patch_mod
             sys.modules["prompt_toolkit.shortcuts"] = short_mod
             sys.modules["prompt_toolkit.styles"] = styles_mod
@@ -120,8 +130,17 @@ _ensure_cli_dependencies()
 from bstkchat.cli import (  # noqa: E402
     ChatClient,
     ChatCompleter,
+    build_arg_parser,
     is_user_mentioned,
     parse_command_args,
+)
+from bstkchat.config import (  # noqa: E402
+    load_config,
+    sanitize_filename,
+    save_config,
+    save_received_file,
+    search_log,
+    tail_log,
 )
 from bstkchat.crypto import encrypt_payload  # noqa: E402
 
@@ -220,3 +239,83 @@ def test_chat_completer_suggests_commands_and_peers():
 
     mention_completions = [c[0] for c in completer.get_completions(_Doc("hello @B"), None)]
     assert "@Bob" in mention_completions
+
+
+def test_encrypted_file_send_and_accept_roundtrip(tmp_path):
+    src_file = tmp_path / "notes.txt"
+    src_file.write_bytes(b"hello encrypted file")
+
+    sender = ChatClient("Alice", "room-file", "pw")
+    sender.client = MagicMock()
+    sender.safe_print = MagicMock()
+    sender.write_to_log = MagicMock()
+
+    assert sender.send_file(str(src_file)) is True
+    published_payload = json.loads(sender.client.publish.call_args[0][1])
+
+    receiver = ChatClient("Bob", "room-file", "pw")
+    receiver.safe_print = MagicMock()
+    receiver.write_to_log = MagicMock()
+    receiver.muted = True
+
+    receiver.handle_chat_message("Alice", "file", published_payload, receiver.msg_topic)
+    assert receiver.get_pending_file_ids() == ["1"]
+
+    dest_dir = tmp_path / "downloads"
+    saved = receiver.accept_file("1", target_dir=str(dest_dir))
+    assert saved is not None
+    assert os.path.basename(saved) == "notes.txt"
+    with open(saved, "rb") as f:
+        assert f.read() == b"hello encrypted file"
+
+
+def test_sanitize_filename_and_collision_avoidance(tmp_path):
+    assert sanitize_filename("../../evil.sh") == "evil.sh"
+    p1 = save_received_file("report.txt", b"one", target_dir=str(tmp_path))
+    p2 = save_received_file("report.txt", b"two", target_dir=str(tmp_path))
+    assert p1 != p2
+    assert os.path.basename(p2) == "report_1.txt"
+
+
+def test_tail_and_search_log(tmp_path):
+    log_file = tmp_path / "room.log"
+    log_file.write_text("line one\nHello World\nline three\nhello again\n", encoding="utf-8")
+
+    assert tail_log(str(log_file), limit=2) == ["line three", "hello again"]
+    matches = search_log(str(log_file), "hello")
+    assert len(matches) == 2
+    assert "L2: Hello World" in matches[0]
+
+
+def test_config_roundtrip_and_cli_flags(tmp_path, monkeypatch):
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    save_config({"nickname": "Alice", "theme": "light", "compact": True})
+    loaded = load_config()
+    assert loaded["nickname"] == "Alice"
+    assert loaded["theme"] == "light"
+
+    args = build_arg_parser().parse_args(["--nick", "Alice", "--room", "dev", "--no-tls", "--compact"])
+    assert args.nick == "Alice"
+    assert args.room == "dev"
+    assert args.no_tls is True
+    assert args.compact is True
+
+
+def test_typing_presence_and_theme_completer():
+    client = ChatClient("Alice", "room-1", "")
+    client.handle_presence("Bob", "typing", {"status": "Active"})
+    assert "Bob" in client.typing_peers
+
+    completer = ChatCompleter(client)
+
+    class _Doc:
+        def __init__(self, text):
+            self.text_before_cursor = text
+
+        def get_word_before_cursor(self, WORD=True):
+            return ""
+
+    themes = [c[0] for c in completer.get_completions(_Doc("/theme l"), None)]
+    assert themes == ["light"]
